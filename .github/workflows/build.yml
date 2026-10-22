@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: build
+        shell: bash
         run: |
           apt-get update -qq && apt-get install -y -qq make python3
           make GIT_COMMIT=${GITHUB_SHA::12} ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
