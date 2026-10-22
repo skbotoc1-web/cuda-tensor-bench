@@ -17,6 +17,8 @@ jobs:
           apt-get update -qq && apt-get install -y -qq make python3 libopenblas-dev
           make GIT_COMMIT=${GITHUB_SHA::12} ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
           make cpu GIT_COMMIT=${GITHUB_SHA::12} CPU_ARCH=-march=x86-64-v2
+      - name: build docs/cuda examples
+        run: make -C docs/cuda/examples ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
       - name: binary starts
         run: ./trianglebench --help | head -3
       - name: CPU benchmark self-test and short run (runs without GPU)

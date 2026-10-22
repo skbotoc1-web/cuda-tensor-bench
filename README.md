@@ -178,6 +178,14 @@ on the A4000, so trianglebench keeps the unfused path.
 
 ![Fused kernel vs. cuBLASLt](docs/figures/fused.png)
 
+## Learning CUDA with this repository
+
+[`docs/cuda/`](docs/cuda/README.md) is a short course that connects CUDA theory to the code and the
+measurements in this repository: execution model and occupancy, memory hierarchy, roofline and the real
+bottleneck, tensor cores and data types, cuBLASLt in practice, and measuring time, energy and clocks.
+Every chapter cites the CUDA Programming Guide, points to the exact code, and shows a measured value
+from the RTX A4000 or the GB10. Three small experiments in `docs/cuda/examples/` reproduce the key effects.
+
 ## Scientific background
 
 ### The problem: triangles as a matrix product
@@ -449,6 +457,7 @@ notebooks/, jupyter/ analysis notebook and JupyterLab image
 results/             reference runs: JSON + telemetry CSV per system
 peak/                datasheet peak tools, CUDA Tile fused-kernel prototype, their results
 docs/figures/        figures used in this README
+docs/cuda/           CUDA programming notes (theory, code, measurement) and small experiments
 Dockerfile, Makefile build recipes; .github/workflows/build.yml is the CI
 ```
 

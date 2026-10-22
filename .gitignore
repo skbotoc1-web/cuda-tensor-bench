@@ -8,3 +8,6 @@ peak/tensorpeak
 peak/sparsepeak
 peak/fusedtri
 __pycache__/
+docs/cuda/examples/bank_conflicts
+docs/cuda/examples/popc_rate
+docs/cuda/examples/epilogue_fp64
