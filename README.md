@@ -149,8 +149,62 @@ docker run --rm --gpus all --user $(id -u):$(id -g) -v "$PWD:/out" -w /out trian
 | `--cooldown` | 0 | idle seconds before every window (to study thermal effects) |
 | `--label` | – | free text stored in the result file |
 | `--out` | `tb_<gpu>_<utc>` | output prefix for `.json` and `.telemetry.csv` |
+| `--quant LIST` | none | opt-in quantisation study: any of `fp32, fp16, bf16, tf32, fp8e4m3, fp8e5m2, int8, int4, fp4e2m1`, or `all` |
 
 The exit code is `0` only if all methods agree on every node.
+
+### Optional quantisation study (`--quant`)
+
+The four fixed methods cover INT32 (CUDA cores), FP32, FP16 and INT8. If you want to compare other input
+formats, pick them yourself; a default run does not include the study, so it stays short and comparable with
+the reference numbers:
+
+```
+trianglebench --n 8192 --quant bf16,tf32,fp8e4m3   # three extra formats
+trianglebench --n 8192 --quant all                 # every format your GPU supports
+trianglebench --n 8192                             # fixed methods only (same as --quant none)
+```
+
+How it is measured:
+
+* Every requested format gets **its own measuring window in every repetition**, right after the rotating
+  windows of M1-M4, with the same telemetry. You get mean ± 95 % CI, CV, watts, TOPS/W, joule per solve,
+  maximum temperature and median SM clock per format, plus the cuBLASLt algorithm that was chosen.
+* The graph is expanded from the same bitset into the input format and multiplied by cuBLASLt (tensor cores
+  where the format has a tensor-core path). The per-node result is compared **with the exact INT32 count of the
+  same run**: `mean_abs_per_node`, `max_abs_per_node`, `exact_node_fraction`, `total_rel_error`.
+  A wrong count makes the run fail exactly like a disagreement between M1-M4.
+* Formats for which cuBLASLt has no kernel on your GPU are listed in `quantization_unsupported` and skipped,
+  never silently replaced by another format.
+
+| format | measured on RTX A4000 (sm_86) | measured on DGX Spark GB10 (sm_121) |
+|---|---|---|
+| fp32, fp16, bf16, tf32, int8 | yes | yes |
+| fp8e4m3 | no (Ampere has no FP8 tensor cores) | yes |
+| fp8e5m2, int4, fp4e2m1 | no | no |
+
+"no" means cuBLASLt (CUDA 13) returned no algorithm for the plain row-major layout this tool uses; the format
+is then reported as unsupported. These formats normally need mixed input types or packed/block-scaled layouts.
+
+Measured with v1.3.0, n = 8192, 5 repetitions, mean ± 95 % CI (`results/*_quant.*`):
+
+| format | GB10 eq.TOPS | W | TOPS/W | J/solve | RTX A4000 eq.TOPS | W | TOPS/W | J/solve |
+|---|---|---|---|---|---|---|---|---|
+| fp32 | 13.72 ± 0.07 | 81.5 | 0.168 | 6.63 | 10.21 ± 0.20 | 137.0 | 0.075 | 14.90 |
+| tf32 | 39.44 ± 0.21 | 77.6 | 0.508 | 2.19 | 32.73 ± 0.43 | 131.6 | 0.249 | 4.47 |
+| fp16 | 79.83 ± 0.31 | 73.6 | 1.085 | 1.02 | 61.08 ± 0.99 | 121.0 | 0.505 | 2.20 |
+| bf16 | 79.63 ± 0.12 | 80.4 | 0.991 | 1.11 | 63.16 ± 1.13 | 137.7 | 0.459 | 2.42 |
+| fp8e4m3 | **150.42 ± 0.51** | 79.9 | 1.882 | 0.59 | n/a | | | |
+| int8 | 129.03 ± 0.38 | 62.1 | **2.077** | **0.53** | **114.00 ± 1.47** | 124.9 | **0.913** | **1.21** |
+
+Every format returned the exact triangle count on every node on both GPUs. Maximum temperature 81-82 °C
+(GB10) and 84-85 °C (A4000). On the GB10, FP8 is the fastest input format, INT8 the most energy-efficient one.
+
+How to read the error columns: the adjacency matrix holds only 0 and 1, which every listed format represents
+exactly, and all formats accumulate in FP32 or INT32. Per-node values stay far below 2^24, so **the result is
+exact for every supported format and the study measures speed, power and energy per format**. That is a property
+of this 0/1 problem, not a statement about quantisation in general (weighted graphs or ML weights do lose
+precision).
 
 ## Output for scientific analysis
 

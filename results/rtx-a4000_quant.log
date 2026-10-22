@@ -1,0 +1,32 @@
+trianglebench 1.3.0 (wip) | NVIDIA RTX A4000 (sm_86, 48 SMs, 16.8 GB) | driver 615.71.10 | CUDA runtime 13.4 | cuBLASLt 130800 | Linux x86_64
+power limit 140 W | ECC off | GPC offset 0 MHz | mem offset 0 MHz | telemetry: NVML energy counter
+quantisation not supported by cuBLASLt on this GPU: fp8e4m3 fp8e5m2 int4 fp4e2m1
+
+graph G(n=8192, p=0.5000, seed=1): 16778862 edges, 11456628772 triangles (theory C(n,3)p^3 = 11449052160, ratio 1.00066)
+clustering: global (FP64) 0.500110, mean local (FP32) 0.500110, theory p = 0.500000
+repetition 1/5 ... done
+repetition 2/5 ... done
+repetition 3/5 ... done
+repetition 4/5 ... done
+repetition 5/5 ... done
+
+n=8192: 5 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc      70.59 +- 2.75    3.14%  139.4     85  1485    0.506      2.192    OK
+                                   native: 1.102 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM              10.31 +- 0.25    1.98%  136.5     85  1320    0.076      14.66    OK
+M3 Tensor Cores FP16->FP32 GEMM       62.71 +- 1.38    1.77%  120.6     85  1410    0.521      2.133    OK
+M4 Tensor Cores INT8->INT32 GEMM     119.16 +- 2.50    1.69%  121.3     84  1485    0.983       1.13    OK
+all four in parallel                  29.83 +- 0.39    1.05%  136.7     85   sum of shares 0.982 +- 0.014 (1 = no gain from parallel execution)
+
+quantisation study (same rotating solo windows as M1-M4, error against the exact INT32 result of this run):
+input format                                eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve error vs exact
+                                                                                                     mean/max per node, exact %, total %
+fp32                                 10.21 +- 0.20    1.55%  137.0     84  1320    0.075       14.9  err mean    0.000 max      0 exact 100.0%  dTotal +0%  OK
+fp16                                 61.08 +- 0.99    1.30%  121.0     84  1410    0.505      2.197  err mean    0.000 max      0 exact 100.0%  dTotal +0%  OK
+bf16                                 63.16 +- 1.13    1.44%  137.7     85  1470    0.459      2.419  err mean    0.000 max      0 exact 100.0%  dTotal +0%  OK
+tf32                                 32.73 +- 0.43    1.06%  131.6     85  1455    0.249      4.473  err mean    0.000 max      0 exact 100.0%  dTotal +0%  OK
+int8                                114.00 +- 1.47    1.04%  124.9     85  1485    0.913      1.212  err mean    0.000 max      0 exact 100.0%  dTotal +0%  OK
+
+result: all methods agree on every node
+written: rtx-a4000_quant.json, rtx-a4000_quant.telemetry.csv

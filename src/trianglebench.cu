@@ -28,10 +28,11 @@
 #include <sys/utsname.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cublasLt.h>
 #include <nvml.h>
 
-#define VERSION "1.1.0"
+#define VERSION "1.3.0"
 #define SCHEMA "trianglebench-result/1"
 #ifndef GIT_COMMIT
 #define GIT_COMMIT "unknown"
@@ -42,6 +43,7 @@
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); exit(2); } } while (0)
 #define LT(x) do { cublasStatus_t s_ = (x); if (s_ != CUBLAS_STATUS_SUCCESS) { fprintf(stderr, "cuBLASLt error %d at %s:%d\n", (int)s_, __FILE__, __LINE__); exit(2); } } while (0)
 typedef unsigned long long u64;
+static u64 total(const std::vector<u64>& rs);
 static double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 // ------------------------------------------------------------------ graph (integer hash, identical on host and GPU)
@@ -139,7 +141,7 @@ __global__ void k_stats(const uint32_t* bits, const u64* rowsum, int n, int W, d
 struct Gemm {
   cublasLtHandle_t h; cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lc; cublasLtMatmulAlgo_t algo;
   void* ws; size_t wsz = 32ull << 20; const void* A; void* C; int32_t ione = 1, izero = 0; float fone = 1, fzero = 0; bool integer;
-  void init(int n, cudaDataType ab, cudaDataType c, cublasComputeType_t ct, const void* a, void* cbuf) {
+  bool init(int n, cudaDataType ab, cudaDataType c, cublasComputeType_t ct, const void* a, void* cbuf) {  // false = no algorithm on this GPU
     integer = (ct == CUBLAS_COMPUTE_32I); A = a; C = cbuf;
     LT(cublasLtCreate(&h)); CK(cudaMalloc(&ws, wsz));
     LT(cublasLtMatmulDescCreate(&op, ct, integer ? CUDA_R_32I : CUDA_R_32F));
@@ -150,20 +152,78 @@ struct Gemm {
     cublasLtMatmulPreference_t pref; LT(cublasLtMatmulPreferenceCreate(&pref));
     LT(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsz, sizeof wsz));
     cublasLtMatmulHeuristicResult_t r; int got = 0;
-    LT(cublasLtMatmulAlgoGetHeuristic(h, op, la, la, lc, lc, pref, 1, &r, &got));
-    if (!got) { fprintf(stderr, "cuBLASLt: no algorithm for this precision on this GPU\n"); exit(2); }
-    algo = r.algo; cublasLtMatmulPreferenceDestroy(pref);
+    if (cublasLtMatmulAlgoGetHeuristic(h, op, la, la, lc, lc, pref, 1, &r, &got) != CUBLAS_STATUS_SUCCESS) got = 0;
+    cublasLtMatmulPreferenceDestroy(pref);
+    if (!got) return false;
+    algo = r.algo;
     size_t w; cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof algo_id, &w);
     cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id, sizeof tile_id, &w);
     cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &stages_id, sizeof stages_id, &w);
+    return true;
   }
   int32_t algo_id = -1; uint32_t tile_id = 0, stages_id = 0;
+  void rebind(const void* a, void* cbuf) { A = a; C = cbuf; }  // fone/fzero live in this object: call after any copy
   void run(cudaStream_t s) {
     const void* al = integer ? (const void*)&ione : (const void*)&fone;
     const void* be = integer ? (const void*)&izero : (const void*)&fzero;
     LT(cublasLtMatmul(h, op, al, A, la, A, la, be, C, lc, C, lc, &algo, ws, wsz, s));
   }
 };
+
+// ------------------------------------------------------------------ quantisation study: A in an arbitrary input format, C = A*A
+// 0/1 entries are exactly representable in every format below, so the only error source is the
+// representation of the *sums* in C (and the input format itself for int4/int8, where 1 stays exact).
+struct Quant { const char* name; const char* id; cudaDataType ab; cudaDataType c; cublasComputeType_t ct; int bits; bool base; };
+// base=true duplicates a fixed method (M2 fp32, M3 fp16, M4 int8) and is therefore not in the default list
+static const Quant QUANTS[] = {
+  {"fp32",     "Q_fp32",            CUDA_R_32F,   CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC, 32, true},
+  {"fp16",     "Q_fp16_fp32",       CUDA_R_16F,   CUDA_R_32F, CUBLAS_COMPUTE_32F,      16, true},
+  {"bf16",     "Q_bf16_fp32",       CUDA_R_16BF,  CUDA_R_32F, CUBLAS_COMPUTE_32F,      16, false},
+  {"tf32",     "Q_tf32_fp32",       CUDA_R_32F,   CUDA_R_32F, CUBLAS_COMPUTE_32F_FAST_TF32, 32, false},
+  {"fp8e4m3",  "Q_fp8e4m3_fp32",    CUDA_R_8F_E4M3, CUDA_R_32F, CUBLAS_COMPUTE_32F,     8, false},
+  {"fp8e5m2",  "Q_fp8e5m2_fp32",    CUDA_R_8F_E5M2, CUDA_R_32F, CUBLAS_COMPUTE_32F,     8, false},
+  {"int8",     "Q_int8_int32",      CUDA_R_8I,    CUDA_R_32I, CUBLAS_COMPUTE_32I,       8, true},
+  {"int4",     "Q_int4_int32",      CUDA_R_4I,    CUDA_R_32I, CUBLAS_COMPUTE_32I,       4, false},
+  {"fp4e2m1",  "Q_fp4e2m1_fp32",    CUDA_R_4F_E2M1, CUDA_R_32F, CUBLAS_COMPUTE_32F,     4, false},
+};
+static const int NQUANT = (int)(sizeof QUANTS / sizeof QUANTS[0]);
+
+__device__ inline uint8_t q_e2m1(bool one) { return one ? 0x2 : 0x0; }  // E2M1: 0.0 = 0b000, 1.0 = 0b010
+__device__ inline uint8_t q_e4m3(bool one) { return one ? 0x38 : 0x00; }  // E4M3: 1.0 = 0b0'0111'000 = 0x38
+__device__ inline uint8_t q_e5m2(bool one) { return one ? 0x3C : 0x00; }  // E5M2: 1.0 = 0b0'01111'00
+
+__global__ void k_quant(const uint32_t* bits, int n, int W, int fmt, void* out) {  // one thread per element pair
+  int pairs = n / 2;   // one thread per element pair: 4-bit formats pack two values per byte, the others use two elements per thread
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n * pairs; idx += gridDim.x * blockDim.x) {
+    int i = idx / pairs, j0 = (idx % pairs) * 2;
+    bool e0 = bit(bits, W, i, j0), e1 = bit(bits, W, i, j0 + 1);
+    size_t o = (size_t)i * pairs + (idx % pairs);   // packed: byte index; non-packed: pair index
+    if (fmt == CUDA_R_4I) { ((uint8_t*)out)[o] = (uint8_t)((e1 ? 1 : 0) | (e0 ? 0x10 : 0)); }
+    else if (fmt == CUDA_R_4F_E2M1) { ((uint8_t*)out)[o] = (uint8_t)(q_e2m1(e1) | (q_e2m1(e0) << 4)); }
+    else if (fmt == CUDA_R_8I) { ((int8_t*)out)[o * 2] = e0 ? 1 : 0; ((int8_t*)out)[o * 2 + 1] = e1 ? 1 : 0; }
+    else if (fmt == CUDA_R_8F_E4M3) { ((uint8_t*)out)[o * 2] = q_e4m3(e0); ((uint8_t*)out)[o * 2 + 1] = q_e4m3(e1); }
+    else if (fmt == CUDA_R_8F_E5M2) { ((uint8_t*)out)[o * 2] = q_e5m2(e0); ((uint8_t*)out)[o * 2 + 1] = q_e5m2(e1); }
+    else if (fmt == CUDA_R_16F) { ((__half*)out)[o * 2] = __float2half(e0 ? 1.f : 0.f); ((__half*)out)[o * 2 + 1] = __float2half(e1 ? 1.f : 0.f); }
+    else if (fmt == CUDA_R_16BF) { ((__nv_bfloat16*)out)[o * 2] = __float2bfloat16(e0 ? 1.f : 0.f); ((__nv_bfloat16*)out)[o * 2 + 1] = __float2bfloat16(e1 ? 1.f : 0.f); }
+    else { ((float*)out)[o * 2] = e0 ? 1.f : 0.f; ((float*)out)[o * 2 + 1] = e1 ? 1.f : 0.f; }
+  }
+}
+
+static u64 total(const std::vector<u64>& rs) { u64 s = 0; for (u64 x : rs) s += x; return s / 6; }
+
+// error of a quantised run against the exact per-node reference
+struct Err { double mean_abs = 0, max_abs = 0, exact_frac = 0, total_rel = 0; u64 total = 0; };
+static Err measure_err(const std::vector<u64>& got, const std::vector<u64>& ref) {
+  Err e; double sum = 0; int exact = 0;
+  for (size_t i = 0; i < ref.size(); i++) {
+    double d = std::fabs((double)got[i] - (double)ref[i]);
+    sum += d; e.max_abs = std::max(e.max_abs, d); exact += (d == 0);
+  }
+  e.mean_abs = sum / ref.size(); e.exact_frac = (double)exact / ref.size();
+  e.total = total(got); double tref = (double)total(ref);
+  e.total_rel = tref ? (double)e.total / tref - 1.0 : 0.0;
+  return e;
+}
 
 // ------------------------------------------------------------------ small helpers: JSON, statistics
 static std::string jstr(const std::string& s) {
@@ -255,7 +315,8 @@ static const char* NAMES[4] = {"M1 CUDA cores  INT32 bitset+popc", "M2 CUDA core
 static const char* IDS[4] = {"M1_cuda_int32_bitset_popc", "M2_cuda_fp32_gemm", "M3_tensor_fp16_fp32acc_gemm", "M4_tensor_int8_int32acc_gemm"};
 struct Ctx {
   int n, W; u64 seed, thr; uint32_t* bits; int8_t* a8; __half* a16; float* a32; int32_t* c8; float *c16, *c32;
-  u64* rowsum[4]; Gemm g[3]; cudaStream_t st[4];
+  u64* rowsum[4]; std::vector<Gemm> g; cudaStream_t st[4];
+  std::vector<int> qidx; std::vector<void*> qin, qout; std::vector<u64*> qrow; cudaStream_t qst;
   void init(int n_, double p, u64 seed_) {
     n = n_; W = n / 32; seed = seed_; thr = (u64)llround(p * 4294967296.0);
     size_t nn = (size_t)n * n;
@@ -265,16 +326,44 @@ struct Ctx {
     k_gen_bits<<<1024, 256>>>(bits, n, W, seed, thr); CK(cudaGetLastError());
     k_expand<<<1024, 256>>>(bits, n, W, a8, a16, a32); CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
-    g[0].init(n, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC, a32, c32);  // M2
-    g[1].init(n, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F, a16, c16);           // M3
-    g[2].init(n, CUDA_R_8I, CUDA_R_32I, CUBLAS_COMPUTE_32I, a8, c8);              // M4
+    g.resize(3);
+    if (!g[0].init(n, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC, a32, c32)) { fprintf(stderr, "cuBLASLt: no algorithm for M2\n"); exit(2); }
+    if (!g[1].init(n, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F, a16, c16)) { fprintf(stderr, "cuBLASLt: no algorithm for M3\n"); exit(2); }
+    if (!g[2].init(n, CUDA_R_8I, CUDA_R_32I, CUBLAS_COMPUTE_32I, a8, c8)) { fprintf(stderr, "cuBLASLt: no algorithm for M4\n"); exit(2); }
   }
   void release() {
+    for (auto& x : g) { cublasLtMatmulDescDestroy(x.op); cublasLtMatrixLayoutDestroy(x.la); cublasLtMatrixLayoutDestroy(x.lc); cudaFree(x.ws); cublasLtDestroy(x.h); }
+    g.clear();
+    for (auto& p : qin) cudaFree(p); for (auto& p : qout) cudaFree(p); for (auto& p : qrow) cudaFree(p);
+    qin.clear(); qout.clear(); qrow.clear();
+    if (qst) { cudaStreamDestroy(qst); qst = nullptr; }
     cudaFree(bits); cudaFree(a8); cudaFree(a16); cudaFree(a32); cudaFree(c8); cudaFree(c16); cudaFree(c32);
     for (int m = 0; m < 4; m++) { cudaFree(rowsum[m]); cudaStreamDestroy(st[m]); }
-    for (auto& x : g) { cublasLtMatmulDescDestroy(x.op); cublasLtMatrixLayoutDestroy(x.la); cublasLtMatrixLayoutDestroy(x.lc); cudaFree(x.ws); cublasLtDestroy(x.h); }
   }
-  void solve(int m) {  // one complete triangle count with method m, asynchronous on stream st[m]
+  void init_quant(const std::vector<int>& want, std::vector<std::string>& unsupported) {  // quantisation methods follow M1-M4
+    CK(cudaStreamCreateWithFlags(&qst, cudaStreamNonBlocking));
+    for (int qi : want) {
+      const Quant& q = QUANTS[qi];
+      void* in; void* out; u64* rs;
+      CK(cudaMalloc(&in, (size_t)n * n * q.bits / 8)); CK(cudaMalloc(&out, (size_t)n * n * 4)); CK(cudaMalloc(&rs, n * 8));
+      Gemm gm;
+      if (!gm.init(n, q.ab, q.c, q.ct, in, out)) { cudaFree(in); cudaFree(out); cudaFree(rs); unsupported.push_back(q.name); continue; }
+      qidx.push_back(qi); qin.push_back(in); qout.push_back(out); qrow.push_back(rs);
+      g.push_back(std::move(gm)); g.back().rebind(in, out);
+    }
+  }
+  int nmethod() const { return 4 + (int)qidx.size(); }
+  void solve(int m) {  // one complete triangle count with method m, asynchronous on one stream
+    if (m >= 4) {  // quantisation method: expand A into the input format, GEMM, masked row sum
+      const Quant& q = QUANTS[qidx[m - 4]];
+      cudaStream_t s = qst;
+      k_quant<<<1024, 256, 0, s>>>(bits, n, W, (int)q.ab, qin[m - 4]);
+      g[m - 1].run(s);
+      if (q.c == CUDA_R_32I) k_masked_rowsum<int32_t><<<n, 256, 0, s>>>((const int32_t*)qout[m - 4], bits, n, W, qrow[m - 4]);
+      else k_masked_rowsum<float><<<n, 256, 0, s>>>((const float*)qout[m - 4], bits, n, W, qrow[m - 4]);
+      CK(cudaGetLastError());
+      return;
+    }
     cudaStream_t s = st[m];
     if (m == 0) {
       CK(cudaMemsetAsync(rowsum[0], 0, n * 8, s));
@@ -287,10 +376,8 @@ struct Ctx {
     }
     CK(cudaGetLastError());
   }
-  std::vector<u64> result(int m) { std::vector<u64> v(n); CK(cudaMemcpy(v.data(), rowsum[m], n * 8, cudaMemcpyDeviceToHost)); return v; }
+  std::vector<u64> result(int m) { std::vector<u64> v(n); CK(cudaMemcpy(v.data(), m >= 4 ? qrow[m - 4] : rowsum[m], n * 8, cudaMemcpyDeviceToHost)); return v; }
 };
-
-static u64 total(const std::vector<u64>& rs) { u64 s = 0; for (u64 x : rs) s += x; return s / 6; }
 
 // CPU reference: brute force over all node triples i<j<k, per-node counts *2 (same scale as rowsum)
 static std::vector<u64> cpu_reference(int n, u64 seed, u64 thr) {
@@ -312,6 +399,20 @@ static int selftest() {
     bool ok = true;
     for (int m = 0; m < 4; m++) { x.solve(m); CK(cudaDeviceSynchronize()); bool eq = x.result(m) == ref; ok &= eq; printf(" M%d %s", m + 1, eq ? "OK" : "FAIL"); }
     if (c.p == 1.0) { u64 exp = (u64)c.n * (c.n - 1) * (c.n - 2) / 6; bool eq = total(ref) == exp; ok &= eq; printf(" | C(n,3) %s", eq ? "OK" : "FAIL"); }
+    if (c.n == 512) {  // quantisation study on a small graph: int4/int8 must stay exact, others report their error
+      std::vector<std::string> unsup; std::vector<int> all; for (int i = 0; i < NQUANT; i++) all.push_back(i);
+      x.init_quant(all, unsup);
+      printf(" quant:");
+      for (int qi = 0; qi < (int)x.qidx.size(); qi++) {
+        x.solve(4 + qi); CK(cudaStreamSynchronize(x.qst));
+        Err e = measure_err(x.result(4 + qi), ref);
+        printf(" %s err=%.3g", QUANTS[x.qidx[qi]].name, e.mean_abs);
+        bool must_be_exact = (QUANTS[x.qidx[qi]].id == std::string("int8") || QUANTS[x.qidx[qi]].id == std::string("int4"));
+        fails += (must_be_exact && e.exact_frac < 1.0);   // 0/1 inputs and INT32 accumulation are exact by construction
+      }
+      for (auto& u : unsup) printf(" %s=n/a", u.c_str());
+      printf("\n");
+    }
     printf("\n"); fails += !ok; x.release();
   }
   printf("selftest: %s\n", fails ? "FAILED" : "PASSED");
@@ -330,12 +431,15 @@ static void usage() {
          "  --cooldown T  idle seconds before every measuring window (default 0)\n"
          "  --label TEXT  free text stored in the result file, e.g. system name or settings\n"
          "  --out PREFIX  writes PREFIX.json and PREFIX.telemetry.csv (default tb_<gpu>_<utc time>)\n"
+         "  --quant LIST  quantisation study, comma separated from: fp32, fp16, bf16, tf32, fp8e4m3,\n"
+         "                fp8e5m2, int8, int4, fp4e2m1, all, none (default: none; opt-in, each format gets\n"
+         "                its own measuring windows; formats unsupported by cuBLASLt on this GPU are skipped)\n"
          "  --selftest    compare all methods with a CPU brute-force count and exit\n", VERSION);
 }
 
 int main(int argc, char** argv) {
   std::vector<int> sizes{8192}; double p = 0.5, secs = 5, warm = 5, cool = 0; int reps = 5; u64 seed = 1; bool st = false;
-  std::string label, out, argline;
+  std::string label, out, argline; std::vector<int> quant;
   for (int i = 0; i < argc; i++) { std::string a = argv[i]; if (a.find(' ') != std::string::npos) a = "'" + a + "'"; argline += (i ? " " : "") + a; }
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i]; auto val = [&] { if (i + 1 >= argc) { usage(); exit(2); } return std::string(argv[++i]); };
@@ -343,6 +447,13 @@ int main(int argc, char** argv) {
     else if (a == "--p") p = atof(val().c_str()); else if (a == "--seed") seed = strtoull(val().c_str(), 0, 10);
     else if (a == "--seconds") secs = atof(val().c_str()); else if (a == "--repeats") reps = atoi(val().c_str());
     else if (a == "--warmup") warm = atof(val().c_str()); else if (a == "--cooldown") cool = atof(val().c_str());
+    else if (a == "--quant") { std::string v = val();
+      for (size_t q = 0, e; q < v.size(); q = e + 1) { e = v.find(',', q); if (e == std::string::npos) e = v.size();
+        std::string name = v.substr(q, e - q); if (name == "none" || name.empty()) continue;
+        if (name == "all") { for (int k = 0; k < NQUANT; k++) if (std::find(quant.begin(), quant.end(), k) == quant.end()) quant.push_back(k); continue; }
+        int i = 0; while (i < NQUANT && name != QUANTS[i].name) i++;
+        if (i == NQUANT) { fprintf(stderr, "unknown --quant '%s' (known: fp32, fp16, bf16, tf32, fp8e4m3, fp8e5m2, int8, int4, fp4e2m1, all, none)\n", name.c_str()); return 2; }
+        if (std::find(quant.begin(), quant.end(), i) == quant.end()) quant.push_back(i); } }
     else if (a == "--label") label = val(); else if (a == "--out") out = val(); else if (a == "--selftest") st = true;
     else { usage(); return a == "--help" || a == "-h" ? 0 : 2; }
   }
@@ -355,7 +466,10 @@ int main(int argc, char** argv) {
   if (p < 0 || p > 1 || reps < 1 || secs <= 0) { fprintf(stderr, "invalid --p, --repeats or --seconds\n"); return 2; }
   for (int n : sizes) {
     if (n < 256 || n % 256 || n >= (1 << 24)) { fprintf(stderr, "invalid --n %d (multiple of 256 required)\n", n); return 2; }
-    size_t need = (size_t)n * n * 19 + (200ull << 20), freeb, totb; CK(cudaMemGetInfo(&freeb, &totb));
+    size_t need = (size_t)n * n * 19, freeb, totb;
+    for (int qi : quant) need += (size_t)n * n * (QUANTS[qi].bits / 8 + 4);
+    need += 200ull << 20;
+    CK(cudaMemGetInfo(&freeb, &totb));
     if (need > freeb) { fprintf(stderr, "n=%d needs %.1f GB GPU memory, %.1f GB free - use a smaller --n\n", n, need / 1e9, freeb / 1e9); return 2; }
   }
   std::string gpu = pr.name, tag;
@@ -409,7 +523,10 @@ int main(int argc, char** argv) {
   int bad = 0;
   for (size_t si = 0; si < sizes.size(); si++) {
     const int n = sizes[si];
-    Ctx x; x.init(n, p, seed);
+    std::vector<std::string> unsupported;
+    Ctx x; x.init(n, p, seed); x.init_quant(quant, unsupported);
+    const int nmethod = x.nmethod();
+    if (!unsupported.empty()) { printf("quantisation not supported by cuBLASLt on this GPU:"); for (auto& u : unsupported) printf(" %s", u.c_str()); printf("\n"); }
     const double ops = 2.0 * n * (double)n * n;  // dense A*A, the common yardstick
     x.solve(3); CK(cudaDeviceSynchronize());
     std::vector<u64> ref = x.result(3);
@@ -428,7 +545,8 @@ int main(int argc, char** argv) {
     { double t0 = now_s(); while (now_s() - t0 < warm) { x.solve(3); CK(cudaStreamSynchronize(x.st[3])); x.solve(0); CK(cudaStreamSynchronize(x.st[0])); } }
 
     struct Meas { std::vector<double> solve_s; Window w; bool ok; double tops, s_per_solve, j_per_solve; };
-    std::vector<Meas> alone[4]; std::vector<std::vector<int>> par_cnt; std::vector<Window> par_w; std::vector<double> par_tops, par_sum;
+    std::vector<Meas> alone[4]; std::vector<std::vector<Meas>> qalone(x.qidx.size()); std::vector<Err> qerr(x.qidx.size());
+    std::vector<std::vector<int>> par_cnt; std::vector<Window> par_w; std::vector<double> par_tops, par_sum;
     for (int r = 0; r < reps; r++) {
       printf("repetition %d/%d ...", r + 1, reps); fflush(stdout);
       double rate[4];
@@ -442,6 +560,16 @@ int main(int argc, char** argv) {
         M.ok = x.result(m) == ref; bad += !M.ok;
         M.s_per_solve = dt / M.solve_s.size(); M.tops = ops / M.s_per_solve / 1e12; M.j_per_solve = M.w.energy_j / M.solve_s.size();
         rate[m] = M.solve_s.size() / dt; alone[m].push_back(M);
+      }
+      for (int qi = 0; qi < (int)x.qidx.size(); qi++) {  // quantisation methods: same rotating solo phase, own stream
+        const int m = 4 + qi;
+        x.solve(m); CK(cudaStreamSynchronize(x.qst));
+        Meas M; tel.start(); double q0 = now_s(), q1 = q0;
+        while (q1 - q0 < secs || M.solve_s.size() < 2) { x.solve(m); CK(cudaStreamSynchronize(x.qst)); double tn = now_s(); M.solve_s.push_back(tn - q1); q1 = tn; }
+        double qdt = q1 - q0; M.w = tel.stop(n, "alone", QUANTS[x.qidx[qi]].id, r + 1);
+        M.ok = x.result(m) == ref; bad += !M.ok;
+        M.s_per_solve = qdt / M.solve_s.size(); M.tops = ops / M.s_per_solve / 1e12; M.j_per_solve = M.w.energy_j / M.solve_s.size();
+        qalone[qi].push_back(M); qerr[qi] = measure_err(x.result(m), ref);
       }
       // phase 2: all four at the same time
       if (cool > 0) std::this_thread::sleep_for(std::chrono::milliseconds((int)(cool * 1000)));
@@ -462,7 +590,6 @@ int main(int argc, char** argv) {
       par_cnt.push_back(cnt); par_w.push_back(w); par_tops.push_back(tops); par_sum.push_back(sum);
       printf(" done\n");
     }
-
     // ---------------- summary for this size
     printf("\nn=%d: %d repetitions x %.0f s, mean +- 95%% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)\n", n, reps, secs);
     printf("%-34s %16s %8s %6s %6s %5s %8s %10s %5s\n", "method", "eq.TOPS", "CV", "W", "T max", "MHz", "TOPS/W", "J/solve", "check");
@@ -501,7 +628,59 @@ int main(int argc, char** argv) {
     for (auto& w : par_w) { pw.push_back(w.watts); ptmax = std::max(ptmax, w.tmax); }
     printf("%-34s %8.2f +-%5.2f %7.2f%% %6.1f %6d   sum of shares %.3f +- %.3f (1 = no gain from parallel execution)\n", "all four in parallel", s_pt.mean, s_pt.ci95,
            100 * s_pt.cv, stats(pw).mean, ptmax, s_ps.mean, s_ps.ci95);
-    J += "],\"parallel\":{\"summary\":{\"eq_tops\":" + jstats(s_pt) + ",\"sum_of_shares\":" + jstats(s_ps) + ",\"watts\":" + jstats(stats(pw)) + "},\"repetitions\":[";
+    if (!qalone.empty()) {
+      printf("\nquantisation study (same rotating solo windows as M1-M4, error against the exact INT32 result of this run):\n");
+      printf("%-34s %16s %8s %6s %6s %5s %8s %10s %s\n", "input format", "eq.TOPS", "CV", "W", "T max", "MHz", "TOPS/W", "J/solve", "error vs exact");
+      printf("%-34s %16s %8s %6s %6s %5s %8s %10s %s\n", "", "", "", "", "", "", "", "", "mean/max per node, exact %, total %");
+    }
+    J += "],\"quantization\":\"quantization_result/1\",\"quantization_methods\":[";
+    for (size_t qi = 0; qi < qalone.size(); qi++) {
+      const Quant& q = QUANTS[x.qidx[qi]]; const Err& e = qerr[qi];
+      std::vector<double> v_tops, v_s, v_w, v_j, v_tpw, v_mhz; int tmax = -1; bool ok = true;
+      for (auto& M : qalone[qi]) { v_tops.push_back(M.tops); v_s.push_back(M.s_per_solve); v_w.push_back(M.w.watts); v_j.push_back(M.j_per_solve);
+        v_tpw.push_back(M.tops / M.w.watts); v_mhz.push_back(M.w.sm_med); tmax = std::max(tmax, M.w.tmax); ok &= M.ok; }
+      Stats s_t = stats(v_tops), s_w = stats(v_w), s_j = stats(v_j), s_e = stats(v_tpw);
+      { char b[256];
+        snprintf(b, sizeof b, "%-34s", q.name); std::string line(b);
+        auto add = [&](const char* fmt, auto... a) { int k = snprintf(b, sizeof b, fmt, a...); if (k > 0) line += b; };
+        add("%8.2f +-%5.2f %7.2f%% %6.1f %6d %5.0f %8.3f %10.4g  err mean %8.3f max %6.0f exact %5.1f%%  dTotal %+d%%  %s\n",
+            s_t.mean, s_t.ci95, 100 * s_t.cv, s_w.mean, tmax, stats(v_mhz).median, s_e.mean, s_j.mean,
+            e.mean_abs, e.max_abs, 100 * e.exact_frac, (int)llround(100 * e.total_rel), ok ? "OK" : "FAIL");
+        printf("%s", line.c_str());
+      }
+      J += std::string(qi ? "," : "") + "{\"id\":" + jstr(q.id) + ",\"input_type\":" + jstr(q.name) + ",\"input_bits\":" + std::to_string(q.bits) +
+        ",\"accumulator\":" + jstr(q.ct == CUBLAS_COMPUTE_32I ? "INT32" : "FP32") + ",\"output_type\":" + jstr(q.c == CUDA_R_32I ? "INT32" : "FP32") +
+        ",\"verified\":" + (ok ? "true" : "false") +
+        ",\"summary\":{\"eq_tops\":" + jstats(s_t) + ",\"seconds_per_solve\":" + jstats(stats(v_s)) + ",\"watts\":" + jstats(s_w) +
+          ",\"joule_per_solve\":" + jstats(s_j) + ",\"eq_tops_per_watt\":" + jstats(s_e) + "}" +
+        ",\"error_vs_exact\":{\"mean_abs_per_node\":" + jnum(e.mean_abs) + ",\"max_abs_per_node\":" + jnum(e.max_abs) +
+          ",\"exact_node_fraction\":" + jnum(e.exact_frac) + ",\"total_triangles\":" + std::to_string(e.total) +
+          ",\"total_rel_error\":" + jnum(e.total_rel) + "}" +
+        ",\"cublaslt_algo\":{\"id\":" + std::to_string(x.g[3 + (int)qi].algo_id) + ",\"tile_id\":" + std::to_string(x.g[3 + (int)qi].tile_id) +
+          ",\"stages_id\":" + std::to_string(x.g[3 + (int)qi].stages_id) + "}" +
+        ",\"repetitions\":[";
+      for (size_t r = 0; r < qalone[qi].size(); r++) {
+        auto& M = qalone[qi][r];
+        J += std::string(r ? "," : "") + "{\"repeat\":" + std::to_string(r + 1) + ",\"solves\":" + std::to_string(M.solve_s.size()) +
+          ",\"window_s\":" + jnum(M.w.dt) + ",\"seconds_per_solve\":" + jnum(M.s_per_solve) + ",\"eq_tops\":" + jnum(M.tops) +
+          ",\"energy_j\":" + jnum(M.w.energy_j) + ",\"energy_source\":" + jstr(M.w.energy_src) + ",\"watts\":" + jnum(M.w.watts) +
+          ",\"joule_per_solve\":" + jnum(M.j_per_solve) + ",\"temp_max_c\":" + jint(M.w.tmax, M.w.tmax >= 0) +
+          ",\"sm_mhz_median\":" + std::to_string(M.w.sm_med) + ",\"sm_mhz_min\":" + std::to_string(M.w.sm_min) +
+          ",\"sm_mhz_max\":" + std::to_string(M.w.sm_max) + ",\"mem_mhz_median\":" + std::to_string(M.w.mem_med) +
+          ",\"clock_event_reasons_or\":\"0x" + [&] { char b[24]; snprintf(b, sizeof b, "%llx", M.w.reasons); return std::string(b); }() +
+          "\",\"telemetry_samples\":" + std::to_string(M.w.nsamples) + ",\"solve_s\":[";
+        for (size_t k = 0; k < M.solve_s.size(); k++) J += (k ? "," : "") + jnum(M.solve_s[k]);
+        J += "]}";
+      }
+      J += "]}";
+    }
+    J += "]";
+    if (!unsupported.empty()) {
+      J += ",\"quantization_unsupported\":[";
+      for (size_t ui = 0; ui < unsupported.size(); ui++) J += std::string(ui ? "," : "") + jstr(unsupported[ui]);
+      J += "]";
+    }
+    J += ",\"parallel\":{\"summary\":{\"eq_tops\":" + jstats(s_pt) + ",\"sum_of_shares\":" + jstats(s_ps) + ",\"watts\":" + jstats(stats(pw)) + "},\"repetitions\":[";
     for (size_t r = 0; r < par_w.size(); r++) {
       J += std::string(r ? "," : "") + "{\"repeat\":" + std::to_string(r + 1) + ",\"solves\":[" + std::to_string(par_cnt[r][0]) + "," + std::to_string(par_cnt[r][1]) + "," +
         std::to_string(par_cnt[r][2]) + "," + std::to_string(par_cnt[r][3]) + "],\"window_s\":" + jnum(par_w[r].dt) + ",\"eq_tops\":" + jnum(par_tops[r]) +

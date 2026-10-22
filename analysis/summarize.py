@@ -10,13 +10,15 @@ pandas.read_csv() or R read.csv() for ANOVA, mixed models, plots etc.
 GPU files (trianglebench) and CPU files (trianglebench-cpu) can be mixed: column device_type is "gpu" or "cpu",
 column gpu holds the device name, sm_mhz_median the median SM clock (GPU) or median core clock (CPU).
 For CPUs, watts is the RAPL package power (empty where the platform has no CPU energy counter).
+Runs with --quant add one row per quantisation format and repetition (method Q_<format>..., columns quant_*).
 """
 import argparse, csv, json, math, statistics, sys
 
 FIELDS = ["file", "label", "device_type", "gpu", "machine", "driver", "cuda_runtime", "power_limit_w", "tool_version", "git_commit",
           "n", "p", "seed", "method", "repeat", "position_in_order", "solves", "window_s", "seconds_per_solve",
           "eq_tops", "watts", "energy_j", "joule_per_solve", "eq_tops_per_watt", "temp_max_c", "sm_mhz_median",
-          "mem_mhz_median", "clock_event_reasons_or", "energy_source", "verified"]
+          "mem_mhz_median", "clock_event_reasons_or", "energy_source", "verified",
+          "quant_input_type", "quant_error_mean_abs_per_node", "quant_exact_node_fraction"]
 
 
 def div(a, b):
@@ -70,6 +72,22 @@ def rows(path):
                        "sm_mhz_median": r["sm_mhz_median"], "mem_mhz_median": r["mem_mhz_median"],
                        "clock_event_reasons_or": r["clock_event_reasons_or"], "energy_source": r["energy_source"],
                        "verified": m["verified"]}
+        for q in run.get("quantization_methods", []):  # optional --quant study (quantization_result/1)
+            e = q["error_vs_exact"]
+            for r in q["repetitions"]:
+                w = r["watts"]
+                yield {"file": path, "label": d["label"], "device_type": "gpu", "gpu": g["name"], "machine": d["system"]["machine"],
+                       "driver": g["driver"], "cuda_runtime": g["cuda_runtime"], "power_limit_w": g["power_limit_w"],
+                       "tool_version": t["version"], "git_commit": t["git_commit"], "n": run["n"], "p": par["p"],
+                       "seed": par["seed"], "method": q["id"], "repeat": r["repeat"], "position_in_order": None,
+                       "solves": r["solves"], "window_s": r["window_s"], "seconds_per_solve": r["seconds_per_solve"],
+                       "eq_tops": r["eq_tops"], "watts": w, "energy_j": r["energy_j"], "joule_per_solve": r["joule_per_solve"],
+                       "eq_tops_per_watt": r["eq_tops"] / w if w else None, "temp_max_c": r["temp_max_c"],
+                       "sm_mhz_median": r["sm_mhz_median"], "mem_mhz_median": r["mem_mhz_median"],
+                       "clock_event_reasons_or": r["clock_event_reasons_or"], "energy_source": r["energy_source"],
+                       "verified": q["verified"], "quant_input_type": q["input_type"],
+                       "quant_error_mean_abs_per_node": e["mean_abs_per_node"],
+                       "quant_exact_node_fraction": e["exact_node_fraction"]}
         pr = run["parallel"]["repetitions"]
         for r in pr:
             yield {"file": path, "label": d["label"], "device_type": "gpu", "gpu": g["name"], "machine": d["system"]["machine"],
