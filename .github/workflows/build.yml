@@ -55,3 +55,8 @@ jobs:
           ls work/export
           test -s work/export/trianglebench-analysis.html
           test -s work/export/tests_between_systems.csv
+      - name: README figures render from the raw data
+        run: |
+          mkdir -m 777 -p docs/figures
+          docker run --rm -v "$PWD:/r" -w /r --entrypoint python3 trianglebench:jupyter analysis/make_figures.py
+          test $(ls docs/figures/*.png | wc -l) -eq 7

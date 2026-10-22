@@ -93,8 +93,9 @@ the sparse and INT4 results. Note: the datasheet's 153.4 is FP16 *with* sparsity
 | RTX A4000 | 4096 | 111.1 | 58.1 | 0.52x | 109.7 / 113.6 | 57 | 1620 / 1800 |
 | RTX A4000 | 8192 | 124.8 | 58.2 | 0.47x | 108.7 / 116.9 | 67 | 1545 / 1770 |
 
-Values in effective TOPS (2n³/t). Fusion pays off only while the matrix fits in L2 (GB10, n <= 4096);
-for large n, cuBLASLt's GEMM wins. trianglebench therefore keeps the unfused path. Lessons for CUDA Tile
+Values in effective TOPS (2n³/t). Fusion pays off only for small matrices (GB10, n = 4096); for large n, cuBLASLt's GEMM wins.
+Likely cause (not profiled): once the operands no longer fit in L2, the hand-written tile kernel lacks cuBLASLt's
+pipelining and rasterisation. trianglebench therefore keeps the unfused path. Lessons for CUDA Tile
 GEMMs: load the B tile row-wise and `ct::transpose` it (column access compiles to byte loads),
 `assume_divisible` the size, and use a grouped block raster (GROUP = 8) for L2 reuse; 128x128x128 tiles were best.
 
