@@ -157,6 +157,47 @@ df = pd.read_csv("all_runs_tidy.csv")
 df.groupby(["gpu", "n", "method"])["eq_tops"].describe()
 ```
 
+## JupyterLab variant: measure, analyse and share in one container
+
+The `jupyter` target of the same Dockerfile adds JupyterLab with pinned Python packages (pandas, SciPy,
+statsmodels, matplotlib), the analysis notebook and the reference results. It runs on amd64 and arm64.
+
+```bash
+docker build --target jupyter -t trianglebench:jupyter .
+mkdir -p work
+docker run --rm --gpus all --user $(id -u):$(id -g) -p 127.0.0.1:8888:8888 -v "$PWD/work:/work" trianglebench:jupyter
+```
+
+Open the `http://127.0.0.1:8888/lab?token=…` link printed in the log. JupyterLab is protected by a random
+token and the port is bound to localhost only; from another machine use an SSH tunnel
+(`ssh -L 8888:127.0.0.1:8888 user@gpu-host`) instead of exposing the port.
+
+`work/trianglebench-analysis.ipynb` (copied once, never overwritten) does the following:
+
+1. optionally runs the self-test and a new benchmark on the GPU of the container (`TB_RUN=1`)
+2. loads the reference results and every file in `work/results/`, checks that all methods agreed and that
+   the triangle counts are identical across systems
+3. descriptive statistics per system, size and method (mean, 95 % CI, CV, watts, TOPS/W, J/solve, °C, MHz)
+4. figures: throughput, efficiency, energy per solution, throughput vs. power/temperature/clock,
+   raw telemetry over time, share of clock-event reasons
+5. Welch t-tests between systems with Holm correction and Hedges' g
+6. design checks: order effect and drift over repetitions (log-linear OLS, % per step with 95 % CI)
+7. exports tables (CSV), figures (PNG/SVG) and `environment.json` (package versions, result provenance)
+   to `work/export/`
+
+Run a measurement and produce a shareable HTML report without opening the browser:
+
+```bash
+docker run --rm --gpus all --user $(id -u):$(id -g) -v "$PWD/work:/work" \
+  -e TB_RUN=1 -e TB_LABEL="my system, stock" -e TB_ARGS="--n 4096,8192 --repeats 10 --seconds 5 --warmup 10" \
+  trianglebench:jupyter sh -c "cp -n /opt/trianglebench/notebooks/*.ipynb . && \
+  jupyter nbconvert --to html --execute trianglebench-analysis.ipynb --output-dir export"
+```
+
+Share `work/export/trianglebench-analysis.html` (self-contained, figures embedded) together with
+`work/results/*.json` and `*.telemetry.csv`, so others can re-run the analysis on the raw data.
+CI executes the notebook on the reference data for every commit.
+
 ## How correctness is guaranteed
 
 * The graph comes from a 64-bit integer hash (splitmix64) of the node pair, identical on CPU and GPU.

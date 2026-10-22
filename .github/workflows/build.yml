@@ -19,3 +19,19 @@ jobs:
         run: ./trianglebench --help | head -3
       - name: analysis script
         run: python3 analysis/summarize.py results/*.json --csv /tmp/all.csv
+
+  jupyter:
+    # Builds the JupyterLab image and executes the analysis notebook on the reference data (no GPU needed).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: build image
+        run: docker build --target jupyter --build-arg GIT_COMMIT=${GITHUB_SHA::12} -t trianglebench:jupyter .
+      - name: execute notebook
+        run: |
+          mkdir -m 777 work
+          docker run --rm -v "$PWD/work:/work" trianglebench:jupyter sh -c \
+            "cp /opt/trianglebench/notebooks/*.ipynb . && jupyter nbconvert --to html --execute trianglebench-analysis.ipynb --output-dir export"
+          ls work/export
+          test -s work/export/trianglebench-analysis.html
+          test -s work/export/tests_between_systems.csv

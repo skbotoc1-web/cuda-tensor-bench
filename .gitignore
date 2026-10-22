@@ -1,2 +1,5 @@
 trianglebench
 *.o
+work/
+export/
+.ipynb_checkpoints/
