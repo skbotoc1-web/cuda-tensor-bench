@@ -1,0 +1,46 @@
+trianglebench-cpu 1.2.0 (a41ed1230c82-dirty) | 10x Cortex-A725 + 10x Cortex-X925 | 20 logical CPUs, 20 cores, 1 socket(s), max 3900 MHz | 20 OpenMP threads, 20 BLAS threads | Linux aarch64
+BLAS: OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY armv8sve MAX_THREADS=64
+energy: unavailable (no RAPL or no read access) | temperature: acpitz (max over sensors) | clock: 20 cpufreq files | throttle counters: 0
+
+graph G(n=4096, p=0.5000, seed=1): 4194186 edges, 1431534897 triangles (theory C(n,3)p^3 = 1430607360, ratio 1.00065)
+clustering: global 0.500110, mean local 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=4096: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                       eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+C1 CPU cores  INT64 bitset+popcnt     4.9461 +-0.1671   4.72%    nan     92  3900      nan        nan    OK
+                                    native: 38.57 G popcnt64/s (AND+POPCNT+ADD per 64-bit word pair)
+C2 CPU cores  FP32 GEMM (BLAS)        0.7604 +-0.0094   1.73%    nan     93  3900      nan        nan    OK
+                                    native: 760.4 GFLOP/s FP32 in sgemm + masked row sum
+
+graph G(n=8192, p=0.5000, seed=1): 16778862 edges, 11456628772 triangles (theory C(n,3)p^3 = 11449052160, ratio 1.00066)
+clustering: global 0.500110, mean local 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=8192: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                       eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+C1 CPU cores  INT64 bitset+popcnt     5.6251 +-0.0243   0.60%    nan     97  3900      nan        nan    OK
+                                    native: 43.94 G popcnt64/s (AND+POPCNT+ADD per 64-bit word pair)
+C2 CPU cores  FP32 GEMM (BLAS)        0.8184 +-0.0097   1.66%    nan     96  3900      nan        nan    OK
+                                    native: 818.4 GFLOP/s FP32 in sgemm + masked row sum
+
+result: both methods agree on every node
+written: dgx-spark-gb10_cpu.json, dgx-spark-gb10_cpu.telemetry.csv

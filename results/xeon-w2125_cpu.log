@@ -1,0 +1,46 @@
+trianglebench-cpu 1.2.0 (a41ed12-cpu) | Intel(R) Xeon(R) W-2125 CPU @ 4.00GHz | 8 logical CPUs, 4 cores, 1 socket(s), max 4500 MHz | 8 OpenMP threads, 8 BLAS threads | Linux x86_64
+BLAS: OpenBLAS 0.3.29 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY SkylakeX MAX_THREADS=128
+energy: RAPL package + DRAM | temperature: coretemp (max over sensors) | clock: 8 cpufreq files | throttle counters: 1
+
+graph G(n=4096, p=0.5000, seed=1): 4194186 edges, 1431534897 triangles (theory C(n,3)p^3 = 1430607360, ratio 1.00065)
+clustering: global 0.500110, mean local 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=4096: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                       eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+C1 CPU cores  INT64 bitset+popcnt     1.4289 +-0.0028   0.27%   91.4     80  4400   0.0156      8.832    OK
+                                    native: 11.16 G popcnt64/s (AND+POPCNT+ADD per 64-bit word pair)
+C2 CPU cores  FP32 GEMM (BLAS)        0.5835 +-0.0027   0.65%  101.6     78  3900   0.0057      24.18    OK
+                                    native: 583.5 GFLOP/s FP32 in sgemm + masked row sum
+
+graph G(n=8192, p=0.5000, seed=1): 16778862 edges, 11456628772 triangles (theory C(n,3)p^3 = 11449052160, ratio 1.00066)
+clustering: global 0.500110, mean local 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=8192: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                       eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+C1 CPU cores  INT64 bitset+popcnt     1.4560 +-0.0047   0.45%   92.0     85  4400   0.0158      70.06    OK
+                                    native: 11.37 G popcnt64/s (AND+POPCNT+ADD per 64-bit word pair)
+C2 CPU cores  FP32 GEMM (BLAS)        0.6075 +-0.0022   0.52%  104.5     84  3900   0.0058      190.3    OK
+                                    native: 607.5 GFLOP/s FP32 in sgemm + masked row sum
+
+result: both methods agree on every node
+written: xeon-w2125_cpu.json, xeon-w2125_cpu.telemetry.csv

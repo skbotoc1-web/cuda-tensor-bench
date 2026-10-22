@@ -1,4 +1,5 @@
 trianglebench
+trianglebench-cpu
 *.o
 work/
 export/

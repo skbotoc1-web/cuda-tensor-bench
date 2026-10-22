@@ -7,25 +7,59 @@
 
 The tidy CSV has one row per (system, n, method, repetition) and can be loaded directly with
 pandas.read_csv() or R read.csv() for ANOVA, mixed models, plots etc.
+GPU files (trianglebench) and CPU files (trianglebench-cpu) can be mixed: column device_type is "gpu" or "cpu",
+column gpu holds the device name, sm_mhz_median the median SM clock (GPU) or median core clock (CPU).
+For CPUs, watts is the RAPL package power (empty where the platform has no CPU energy counter).
 """
 import argparse, csv, json, math, statistics, sys
 
-FIELDS = ["file", "label", "gpu", "machine", "driver", "cuda_runtime", "power_limit_w", "tool_version", "git_commit",
+FIELDS = ["file", "label", "device_type", "gpu", "machine", "driver", "cuda_runtime", "power_limit_w", "tool_version", "git_commit",
           "n", "p", "seed", "method", "repeat", "position_in_order", "solves", "window_s", "seconds_per_solve",
           "eq_tops", "watts", "energy_j", "joule_per_solve", "eq_tops_per_watt", "temp_max_c", "sm_mhz_median",
           "mem_mhz_median", "clock_event_reasons_or", "energy_source", "verified"]
 
 
+def div(a, b):
+    return a / b if a is not None and b else None
+
+
+def mean(v):
+    v = [x for x in v if x is not None]
+    return statistics.mean(v) if v else float("nan")
+
+
+def cpu_rows(path, d):
+    c, t, par = d["cpu"], d["tool"], d["parameters"]
+    for run in d["runs"]:
+        for m in run["methods"]:
+            for r in m["repetitions"]:
+                yield {"file": path, "label": d["label"], "device_type": "cpu", "gpu": c["name"],
+                       "machine": d["system"]["machine"], "driver": None, "cuda_runtime": None, "power_limit_w": None,
+                       "tool_version": t["version"], "git_commit": t["git_commit"], "n": run["n"], "p": par["p"],
+                       "seed": par["seed"], "method": m["id"], "repeat": r["repeat"],
+                       "position_in_order": r["position_in_order"], "solves": r["solves"], "window_s": r["window_s"],
+                       "seconds_per_solve": r["seconds_per_solve"], "eq_tops": r["eq_tops"], "watts": r["watts"],
+                       "energy_j": r["energy_j"], "joule_per_solve": r["joule_per_solve"],
+                       "eq_tops_per_watt": div(r["eq_tops"], r["watts"]), "temp_max_c": r["temp_max_c"],
+                       "sm_mhz_median": r["cpu_mhz_median"], "mem_mhz_median": None,
+                       "clock_event_reasons_or": r["thermal_throttle_events"], "energy_source": r["energy_source"],
+                       "verified": m["verified"]}
+
+
 def rows(path):
     d = json.load(open(path))
-    if not str(d.get("schema", "")).startswith("trianglebench-result/"):
+    schema = str(d.get("schema", ""))
+    if schema.startswith("trianglebench-cpu-result/"):
+        yield from cpu_rows(path, d)
+        return
+    if not schema.startswith("trianglebench-result/"):
         sys.exit(f"{path}: not a trianglebench result file")
     g, t, par = d["gpu"], d["tool"], d["parameters"]
     for run in d["runs"]:
         for m in run["methods"]:
             for r in m["repetitions"]:
                 w = r["watts"]
-                yield {"file": path, "label": d["label"], "gpu": g["name"], "machine": d["system"]["machine"],
+                yield {"file": path, "label": d["label"], "device_type": "gpu", "gpu": g["name"], "machine": d["system"]["machine"],
                        "driver": g["driver"], "cuda_runtime": g["cuda_runtime"], "power_limit_w": g["power_limit_w"],
                        "tool_version": t["version"], "git_commit": t["git_commit"], "n": run["n"], "p": par["p"],
                        "seed": par["seed"], "method": m["id"], "repeat": r["repeat"],
@@ -38,7 +72,7 @@ def rows(path):
                        "verified": m["verified"]}
         pr = run["parallel"]["repetitions"]
         for r in pr:
-            yield {"file": path, "label": d["label"], "gpu": g["name"], "machine": d["system"]["machine"],
+            yield {"file": path, "label": d["label"], "device_type": "gpu", "gpu": g["name"], "machine": d["system"]["machine"],
                    "driver": g["driver"], "cuda_runtime": g["cuda_runtime"], "power_limit_w": g["power_limit_w"],
                    "tool_version": t["version"], "git_commit": t["git_commit"], "n": run["n"], "p": par["p"],
                    "seed": par["seed"], "method": "P_all_four_parallel", "repeat": r["repeat"], "position_in_order": 5,
@@ -114,7 +148,7 @@ def main():
     for (f, gpu, n, m), g in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][2], kv[0][3])):
         v = [x["eq_tops"] for x in g]
         print(f"{gpu[:18]:<18} {n:>6} {m:<30} {len(v):>3} {statistics.mean(v):8.2f} +-{ci95(v):6.2f} "
-              f"{statistics.mean(x['watts'] for x in g):7.1f} {statistics.mean(x['eq_tops_per_watt'] for x in g):7.3f} "
+              f"{mean(x['watts'] for x in g):7.1f} {mean(x['eq_tops_per_watt'] for x in g):7.3f} "
               f"{statistics.median(x['sm_mhz_median'] for x in g):5.0f} {max(x['temp_max_c'] or 0 for x in g):4}")
 
     if a.compare:
@@ -130,8 +164,8 @@ def main():
             if not other or len(g) < 2 or len(other[0]) < 2:
                 continue
             x, y = [r["eq_tops"] for r in g], [r["eq_tops"] for r in other[0]]
-            ex = statistics.mean(r["eq_tops_per_watt"] for r in g)
-            ey = statistics.mean(r["eq_tops_per_watt"] for r in other[0])
+            ex = mean(r["eq_tops_per_watt"] for r in g)
+            ey = mean(r["eq_tops_per_watt"] for r in other[0])
             t, df, p = welch(x, y)
             print(f"{n:>6} {m:<30} {statistics.mean(y) / statistics.mean(x):10.3f} {ey / ex:12.3f} {t:8.2f} {df:6.1f} {p:9.2g}")
 

@@ -5,7 +5,8 @@ on:
 jobs:
   compile:
     # GitHub-hosted runners have no GPU: this job proves that the code compiles for Ampere (sm_86)
-    # and Blackwell / DGX Spark (sm_121) and that the analysis script works on the reference result files.
+    # and Blackwell / DGX Spark (sm_121), that the CPU benchmark is correct (self-test) and that the analysis script
+    # works on the reference result files.
     runs-on: ubuntu-24.04
     container: nvidia/cuda:13.0.3-devel-ubuntu24.04
     steps:
@@ -13,10 +14,16 @@ jobs:
       - name: build
         shell: bash
         run: |
-          apt-get update -qq && apt-get install -y -qq make python3
+          apt-get update -qq && apt-get install -y -qq make python3 libopenblas-dev
           make GIT_COMMIT=${GITHUB_SHA::12} ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
+          make cpu GIT_COMMIT=${GITHUB_SHA::12} CPU_ARCH=-march=x86-64-v2
       - name: binary starts
         run: ./trianglebench --help | head -3
+      - name: CPU benchmark self-test and short run (runs without GPU)
+        run: |
+          ./trianglebench-cpu --selftest
+          ./trianglebench-cpu --n 1024 --repeats 2 --seconds 0.5 --warmup 0.5 --label ci --out /tmp/ci_cpu
+          python3 analysis/summarize.py /tmp/ci_cpu.json
       - name: analysis script
         run: python3 analysis/summarize.py results/*.json --csv /tmp/all.csv
 

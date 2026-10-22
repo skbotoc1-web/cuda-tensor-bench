@@ -2,7 +2,8 @@
 
 How many triangles does a random graph with 16,384 nodes and 67 million edges contain?
 `trianglebench` answers this classic graph-theory question **four times, with four independent methods**,
-two on the CUDA cores and two on the Tensor Cores. All answers must agree **for every single node**,
+two on the CUDA cores and two on the Tensor Cores - and `trianglebench-cpu` adds two CPU-only methods on top.
+All answers must agree **for every single node**,
 so every speed number comes with a proof of correctness. Results are written as JSON plus a raw
 telemetry CSV, ready for statistical analysis.
 
@@ -64,6 +65,41 @@ What the data shows:
 
 `eq.TOPS` = `2n³ / time`: the work of one dense `A·A`, used as a common yardstick for all methods.
 For M1 this is an *effective* rate; the native popcount rate is printed separately (`eq.TOPS / 64`).
+
+### CPU: Xeon W-2125 (4 cores / 8 threads) vs. GB10 CPU (10x Cortex-X925 + 10x Cortex-A725, 20 cores)
+
+Same protocol, same graphs, n = 8192, 10 repetitions x 5 s, mean ± 95 % CI. eqTOPS is the same formula as on the GPU,
+so CPU and GPU columns are directly comparable.
+
+| method | Xeon W-2125 | GB10 CPU | GB10/Xeon |
+|---|---|---|---|
+| C1 INT64 bitset + popcount (eqTOPS) | 1.456 ±0.005 | **5.625** ±0.024 | 3.86x |
+| C2 FP32 GEMM, BLAS (eqTOPS) | 0.608 ±0.002 | **0.818** ±0.010 | 1.35x |
+| native rate C1 | 11.4 G popcnt64/s | 43.9 G popcnt64/s | 3.86x |
+| native rate C2 | 608 GFLOP/s FP32 | 818 GFLOP/s FP32 | 1.35x |
+| CPU package power (RAPL) | 92 W | not measurable | - |
+| eqTOPS per watt | 0.0158 | - | - |
+| joule per solve | 70.1 J | not measurable | - |
+| max. temperature | 85 °C | 97 °C (hottest SoC sensor) | - |
+| median clock | 4400 MHz (C1) / 3900 MHz (C2) | 3900 MHz | - |
+| thermal throttle events | 0 | not reported | - |
+
+CPU vs. GPU at n = 8192, same algorithm (95 % CI from a Welch interval on log eq.TOPS, see `cpu_vs_gpu.csv`):
+
+| comparison | GPU | CPU | speed-up GPU/CPU |
+|---|---|---|---|
+| bitset + popcount | A4000 M1 68.9 eqTOPS | Xeon C1 1.456 | 47.3x (47.2 - 47.5) |
+| bitset + popcount | GB10 M1 119.3 eqTOPS | GB10 C1 5.625 | 21.2x (21.1 - 21.3) |
+| FP32 GEMM | A4000 M2 10.2 | Xeon C2 0.608 | 16.7x (16.7 - 16.8) |
+| FP32 GEMM | GB10 M2 14.8 | GB10 C2 0.818 | 18.1x (17.9 - 18.3) |
+| energy per solve | A4000 M1 2.23 J | Xeon C1 70.1 J | 31x more energy on the CPU |
+| energy per solve | GB10 M4 INT8 0.53 J | Xeon C1 70.1 J | 132x more energy on the CPU |
+
+Notes: the GB10 SoC exposes no CPU energy counter (no RAPL, no hwmon power input), so CPU watts, TOPS/W and joules
+stay empty there - only temperature and clock are available. The 97 °C is the maximum over all SoC thermal zones
+(`acpitz`), not an identified CPU-only sensor. The Xeon reaches ~66 % of its theoretical AVX-512 FP32 peak in C2,
+the GB10 CPU ~48 % of its estimated NEON/SVE2 peak - its OpenBLAS 0.3.26 has no kernel tuned for these cores
+(to be confirmed).
 
 ### Limitations of these reference runs
 
