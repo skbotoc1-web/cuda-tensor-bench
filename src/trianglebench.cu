@@ -336,7 +336,7 @@ static void usage() {
 int main(int argc, char** argv) {
   std::vector<int> sizes{8192}; double p = 0.5, secs = 5, warm = 5, cool = 0; int reps = 5; u64 seed = 1; bool st = false;
   std::string label, out, argline;
-  for (int i = 0; i < argc; i++) argline += (i ? " " : "") + std::string(argv[i]);
+  for (int i = 0; i < argc; i++) { std::string a = argv[i]; if (a.find(' ') != std::string::npos) a = "'" + a + "'"; argline += (i ? " " : "") + a; }
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i]; auto val = [&] { if (i + 1 >= argc) { usage(); exit(2); } return std::string(argv[++i]); };
     if (a == "--n") { sizes.clear(); std::string v = val(); for (size_t q = 0, e; q < v.size(); q = e + 1) { e = v.find(',', q); if (e == std::string::npos) e = v.size(); sizes.push_back(atoi(v.substr(q, e - q).c_str())); } }

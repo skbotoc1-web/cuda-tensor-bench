@@ -4,12 +4,17 @@ on:
   pull_request:
 jobs:
   compile:
-    # GitHub-hosted runners have no GPU: this job only proves that the code compiles.
+    # GitHub-hosted runners have no GPU: this job proves that the code compiles for Ampere (sm_86)
+    # and Blackwell / DGX Spark (sm_121) and that the analysis script works on the reference result files.
     runs-on: ubuntu-24.04
     container: nvidia/cuda:13.0.3-devel-ubuntu24.04
     steps:
       - uses: actions/checkout@v7
       - name: build
-        run: apt-get update -qq && apt-get install -y -qq make && make ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_90,code=compute_90"
+        run: |
+          apt-get update -qq && apt-get install -y -qq make python3
+          make GIT_COMMIT=${GITHUB_SHA::12} ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
       - name: binary starts
         run: ./trianglebench --help | head -3
+      - name: analysis script
+        run: python3 analysis/summarize.py results/*.json --csv /tmp/all.csv

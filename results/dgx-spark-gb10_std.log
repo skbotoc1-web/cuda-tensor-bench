@@ -1,0 +1,49 @@
+trianglebench 1.1.0 (441cae97f1f7) | NVIDIA GB10 (sm_121, 48 SMs, 130.7 GB) | driver 580.178.04 | CUDA runtime 13.0 | cuBLASLt 130101 | Linux aarch64
+power limit n/a W | ECC n/a | GPC offset 0 MHz | mem offset n/a MHz | telemetry: NVML energy counter
+
+graph G(n=4096, p=0.5000, seed=1): 4194186 edges, 1431534897 triangles (theory C(n,3)p^3 = 1430607360, ratio 1.00065)
+clustering: global (FP64) 0.500110, mean local (FP32) 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=4096: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc     118.15 +- 0.35    0.41%   86.2     80  2509    1.371     0.1008    OK
+                                   native: 1.846 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM              16.63 +- 0.05    0.42%   92.5     81  2509    0.180     0.7678    OK
+M3 Tensor Cores FP16->FP32 GEMM       77.47 +- 0.22    0.40%   73.4     81  2509    1.056     0.1308    OK
+M4 Tensor Cores INT8->INT32 GEMM     120.85 +- 0.26    0.31%   62.0     79  2509    1.949    0.07089    OK
+all four in parallel                  42.42 +- 0.16    0.53%   79.8     80   sum of shares 0.924 +- 0.004 (1 = no gain from parallel execution)
+
+graph G(n=8192, p=0.5000, seed=1): 16778862 edges, 11456628772 triangles (theory C(n,3)p^3 = 11449052160, ratio 1.00066)
+clustering: global (FP64) 0.500110, mean local (FP32) 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=8192: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc     119.30 +- 0.09    0.11%   88.1     82  2489    1.355     0.8141    OK
+                                   native: 1.864 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM              14.81 +- 0.03    0.32%   88.0     83  2489    0.168      6.605    OK
+M3 Tensor Cores FP16->FP32 GEMM       86.30 +- 0.18    0.29%   78.7     82  2502    1.097      1.006    OK
+M4 Tensor Cores INT8->INT32 GEMM     132.54 +- 0.13    0.14%   63.8     81  2502    2.077     0.5315    OK
+all four in parallel                  42.98 +- 0.10    0.34%   80.0     83   sum of shares 0.990 +- 0.003 (1 = no gain from parallel execution)
+
+result: all methods agree on every node
+written: dgx-spark-gb10_std.json, dgx-spark-gb10_std.telemetry.csv

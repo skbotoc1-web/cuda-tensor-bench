@@ -1,0 +1,71 @@
+trianglebench 1.1.0 (441cae97f1f7) | NVIDIA RTX A4000 (sm_86, 48 SMs, 16.8 GB) | driver 615.71.10 | CUDA runtime 13.4 | cuBLASLt 130800 | Linux x86_64
+power limit 140 W | ECC off | GPC offset 0 MHz | mem offset 0 MHz | telemetry: NVML energy counter
+
+graph G(n=4096, p=0.5000, seed=1): 4194186 edges, 1431534897 triangles (theory C(n,3)p^3 = 1430607360, ratio 1.00065)
+clustering: global (FP64) 0.500110, mean local (FP32) 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=4096: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc      77.45 +- 1.02    1.84%  138.9     85  1665    0.558     0.2471    OK
+                                   native: 1.210 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM               9.57 +- 0.11    1.58%  125.7     85  1275    0.076      1.825    OK
+M3 Tensor Cores FP16->FP32 GEMM       52.64 +- 0.48    1.26%  132.0     83  1500    0.399     0.3453    OK
+M4 Tensor Cores INT8->INT32 GEMM     102.37 +- 0.88    1.20%  125.9     83  1560    0.814     0.1694    OK
+all four in parallel                  32.18 +- 0.26    1.13%  131.0     85   sum of shares 1.006 +- 0.003 (1 = no gain from parallel execution)
+
+graph G(n=8192, p=0.5000, seed=1): 16778862 edges, 11456628772 triangles (theory C(n,3)p^3 = 11449052160, ratio 1.00066)
+clustering: global (FP64) 0.500110, mean local (FP32) 0.500110, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=8192: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc      68.90 +- 0.09    0.18%  138.8     85  1470    0.497      2.229    OK
+                                   native: 1.077 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM              10.15 +- 0.01    0.13%  140.4     85  1320    0.072      15.26    OK
+M3 Tensor Cores FP16->FP32 GEMM       61.93 +- 0.05    0.11%  124.2     85  1410    0.499      2.236    OK
+M4 Tensor Cores INT8->INT32 GEMM     117.35 +- 0.07    0.08%  123.5     85  1470    0.950      1.166    OK
+all four in parallel                  29.46 +- 0.17    0.83%  137.7     85   sum of shares 0.991 +- 0.002 (1 = no gain from parallel execution)
+
+graph G(n=16384, p=0.5000, seed=1): 67111410 edges, 91636293818 triangles (theory C(n,3)p^3 = 91609192448, ratio 1.00030)
+clustering: global (FP64) 0.500049, mean local (FP32) 0.500022, theory p = 0.500000
+repetition 1/10 ... done
+repetition 2/10 ... done
+repetition 3/10 ... done
+repetition 4/10 ... done
+repetition 5/10 ... done
+repetition 6/10 ... done
+repetition 7/10 ... done
+repetition 8/10 ... done
+repetition 9/10 ... done
+repetition 10/10 ... done
+
+n=16384: 10 repetitions x 5 s, mean +- 95% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)
+method                                      eq.TOPS       CV      W  T max   MHz   TOPS/W    J/solve check
+M1 CUDA cores  INT32 bitset+popc      68.88 +- 0.05    0.11%  139.3     85  1455    0.494      18.01    OK
+                                   native: 1.076 T popc/s (AND+POPC+ADD per 32-bit word pair)
+M2 CUDA cores  FP32 GEMM              10.21 +- 0.00    0.03%  137.4     85  1305    0.074      119.4    OK
+M3 Tensor Cores FP16->FP32 GEMM       62.65 +- 0.19    0.43%  130.5     85  1350    0.480      18.53    OK
+M4 Tensor Cores INT8->INT32 GEMM     124.18 +- 0.33    0.37%  128.3     85  1418    0.968      9.196    OK
+all four in parallel                  29.12 +- 0.34    1.61%  138.4     85   sum of shares 0.957 +- 0.005 (1 = no gain from parallel execution)
+
+result: all methods agree on every node
+written: rtx-a4000_std.json, rtx-a4000_std.telemetry.csv
