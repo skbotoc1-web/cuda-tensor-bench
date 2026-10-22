@@ -1,0 +1,15 @@
+name: build
+on:
+  push:
+  pull_request:
+jobs:
+  compile:
+    # GitHub-hosted runners have no GPU: this job only proves that the code compiles.
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.0.3-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: apt-get update -qq && apt-get install -y -qq make && make ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_90,code=compute_90"
+      - name: binary starts
+        run: ./trianglebench --help | head -3

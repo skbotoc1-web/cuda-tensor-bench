@@ -1,0 +1,22 @@
+trianglebench 1.0.0 | NVIDIA RTX A4000 (sm_86, 48 SMs, 16.8 GB) | driver 615.71.10 | CUDA runtime 13.4
+graph G(n=16384, p=0.5000, seed=1): 67111410 edges, 91636293818 triangles (theory C(n,3)p^3 = 91609192448, ratio 1.00030)
+clustering: global (FP64) 0.500049, mean local (FP32) 0.500023, theory p = 0.500000
+
+Phase 1: each method alone (10 s each). 'eq.TOPS' = 2n^3 / time, the work of a dense A*A.
+method                               s/solve  eq.TOPS   W avg  T max   MHz   TOPS/W  J/solve  check
+M1 CUDA cores  INT32 bitset+popc      0.1177    74.74   139.5     58  1590    0.536     16.4  OK
+                                   native: 1.17 T popc/s, 3.50 T int32 ops/s (AND+POPC+ADD); 1 popc = 32 multiply-adds of 0/1 values
+M2 CUDA cores  FP32 GEMM              0.8267    10.64   131.7     66  1350    0.081    108.9  OK
+M3 Tensor Cores FP16->FP32 GEMM       0.1345    65.41   123.9     70  1410    0.528     16.7  OK
+M4 Tensor Cores INT8->INT32 GEMM      0.0685   128.35   122.3     73  1455    1.049      8.4  OK
+
+Phase 2: all four methods at the same time, one CUDA stream and host thread each (10 s)
+method                               alone/s parallel/s   share  check
+M1 CUDA cores  INT32 bitset+popc       8.497     0.971    0.11  OK
+M2 CUDA cores  FP32 GEMM               1.210     0.776    0.64  OK
+M3 Tensor Cores FP16->FP32 GEMM        7.436     0.776    0.10  OK
+M4 Tensor Cores INT8->INT32 GEMM      14.592     0.776    0.05  OK
+all four together: 29.02 eq.TOPS, 136.5 W avg, T max 76 C, 1335 MHz, 0.213 TOPS/W
+sum of shares 0.91  (1.00 = no gain from running in parallel; >1 = units overlap; <1 = they get in each other's way)
+
+result: all methods agree on every node
