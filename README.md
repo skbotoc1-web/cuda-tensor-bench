@@ -186,6 +186,27 @@ How it is measured:
 "no" means cuBLASLt (CUDA 13) returned no algorithm for the plain row-major layout this tool uses; the format
 is then reported as unsupported. These formats normally need mixed input types or packed/block-scaled layouts.
 
+What the tensor cores support in hardware (CUDA Programming Guide 13.4, Table 33, "Input Data Types Supported
+by Tensor Core Acceleration per Compute Capability"):
+
+| compute capability | TF32 | BF16 | FP16 | FP8 | FP6 | FP4 | INT8 | INT4 |
+|---|---|---|---|---|---|---|---|---|
+| 8.6 (RTX A4000, Ampere) | yes | yes | yes | – | – | – | yes | yes |
+| 12.x (GB10, Blackwell) | yes | yes | yes | yes | yes | yes | yes | – |
+
+So the "no" entries in the table above have two different causes:
+
+* **Hardware limit:** INT4 on the GB10 and FP8/FP4 on the A4000 do not exist in the tensor cores. No
+  library or compiler flag can change that.
+* **Layout limit of this tool:** INT4 on the A4000 and FP4 on the GB10 exist in hardware, but are only
+  reachable with packed (two values per byte) and, for FP4, block-scaled operands (e.g. NVFP4: one UE4M3 scale
+  per 16 values). trianglebench multiplies a plain row-major 0/1 matrix, so it reports them as unsupported
+  rather than measuring a different problem. Writing such kernels yourself also requires the
+  architecture-specific target (`sm_121a` or the family target `compute_120f`, Programming Guide §5.1.2);
+  the generic `-arch=native` build used here only gives the baseline feature set.
+* **Library limit:** fp8e5m2 exists in hardware on the GB10, but cuBLASLt returned no algorithm for
+  e5m2 × e5m2, and this tool uses the same format for both operands.
+
 Measured with v1.3.0, n = 8192, 5 repetitions, mean ± 95 % CI (`results/*_quant.*`):
 
 | format | GB10 eq.TOPS | W | TOPS/W | J/solve | RTX A4000 eq.TOPS | W | TOPS/W | J/solve |
