@@ -24,12 +24,21 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <ctime>
+#include <sys/utsname.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>
 #include <nvml.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
+#define SCHEMA "trianglebench-result/1"
+#ifndef GIT_COMMIT
+#define GIT_COMMIT "unknown"
+#endif
+#ifndef BUILD_ARCH
+#define BUILD_ARCH "unknown"
+#endif
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); exit(2); } } while (0)
 #define LT(x) do { cublasStatus_t s_ = (x); if (s_ != CUBLAS_STATUS_SUCCESS) { fprintf(stderr, "cuBLASLt error %d at %s:%d\n", (int)s_, __FILE__, __LINE__); exit(2); } } while (0)
 typedef unsigned long long u64;
@@ -144,7 +153,11 @@ struct Gemm {
     LT(cublasLtMatmulAlgoGetHeuristic(h, op, la, la, lc, lc, pref, 1, &r, &got));
     if (!got) { fprintf(stderr, "cuBLASLt: no algorithm for this precision on this GPU\n"); exit(2); }
     algo = r.algo; cublasLtMatmulPreferenceDestroy(pref);
+    size_t w; cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof algo_id, &w);
+    cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id, sizeof tile_id, &w);
+    cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &stages_id, sizeof stages_id, &w);
   }
+  int32_t algo_id = -1; uint32_t tile_id = 0, stages_id = 0;
   void run(cudaStream_t s) {
     const void* al = integer ? (const void*)&ione : (const void*)&fone;
     const void* be = integer ? (const void*)&izero : (const void*)&fzero;
@@ -152,45 +165,94 @@ struct Gemm {
   }
 };
 
-// ------------------------------------------------------------------ NVML telemetry (energy counter + 100 ms samples)
+// ------------------------------------------------------------------ small helpers: JSON, statistics
+static std::string jstr(const std::string& s) {
+  std::string o = "\"";
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
+    else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+    else o += (char)c;
+  }
+  return o + "\"";
+}
+static std::string jnum(double v) { if (!std::isfinite(v)) return "null"; char b[40]; snprintf(b, sizeof b, "%.10g", v); return b; }
+static std::string jint(long long v, bool valid = true) { return valid ? std::to_string(v) : "null"; }
+static std::string utc_now() { time_t t = time(nullptr); char b[32]; strftime(b, sizeof b, "%Y-%m-%dT%H:%M:%SZ", gmtime(&t)); return b; }
+
+struct Stats { int k = 0; double mean = NAN, sd = NAN, ci95 = NAN, median = NAN, min = NAN, max = NAN, cv = NAN; };
+static double t975(int df) {  // two-sided 95 % Student t quantile
+  static const double t[] = {12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
+                             2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042};
+  return df <= 0 ? NAN : df <= 30 ? t[df - 1] : df <= 60 ? 2.000 : df <= 120 ? 1.980 : 1.960;
+}
+static Stats stats(std::vector<double> v) {
+  Stats s; s.k = (int)v.size(); if (v.empty()) return s;
+  std::sort(v.begin(), v.end());
+  double sum = 0; for (double x : v) sum += x; s.mean = sum / s.k;
+  s.median = s.k % 2 ? v[s.k / 2] : 0.5 * (v[s.k / 2 - 1] + v[s.k / 2]); s.min = v.front(); s.max = v.back();
+  if (s.k > 1) { double q = 0; for (double x : v) q += (x - s.mean) * (x - s.mean); s.sd = sqrt(q / (s.k - 1)); s.ci95 = t975(s.k - 1) * s.sd / sqrt((double)s.k); s.cv = s.sd / s.mean; }
+  return s;
+}
+static std::string jstats(const Stats& s) {
+  return "{\"k\":" + std::to_string(s.k) + ",\"mean\":" + jnum(s.mean) + ",\"sd\":" + jnum(s.sd) + ",\"ci95_halfwidth\":" + jnum(s.ci95) +
+         ",\"median\":" + jnum(s.median) + ",\"min\":" + jnum(s.min) + ",\"max\":" + jnum(s.max) + ",\"cv\":" + jnum(s.cv) + "}";
+}
+
+// ------------------------------------------------------------------ NVML telemetry: samples every 100 ms, raw rows go to CSV
+struct Window { double dt = 0, energy_j = NAN, watts = NAN; int tmax = -1; unsigned sm_med = 0, sm_min = 0, sm_max = 0, mem_med = 0;
+                u64 reasons = 0; std::string energy_src = "none"; size_t nsamples = 0; };
 struct Telemetry {
-  nvmlDevice_t dev; bool ok = false, energy_ok = false;
-  std::atomic<bool> running{false}; std::thread th; unsigned tmax = 0; std::vector<unsigned> clocks; double t0 = 0, wsum = 0; int wn = 0; u64 e0 = 0;
-  void init(int cuda_dev) {
+  struct S { double t, w; int temp; unsigned sm, mem; u64 reasons; };
+  nvmlDevice_t dev; bool ok = false, energy_ok = false; const int period_ms = 100;
+  std::atomic<bool> running{false}; std::thread th; std::vector<S> buf; double t0 = 0; u64 e0 = 0; FILE* csv = nullptr;
+  void init(int cuda_dev, FILE* f) {
+    csv = f;
     char bus[32]; CK(cudaDeviceGetPCIBusId(bus, sizeof bus, cuda_dev));
     ok = nvmlInit_v2() == NVML_SUCCESS && nvmlDeviceGetHandleByPciBusId_v2(bus, &dev) == NVML_SUCCESS;
     u64 e; energy_ok = ok && nvmlDeviceGetTotalEnergyConsumption(dev, &e) == NVML_SUCCESS;
+    if (csv) fprintf(csv, "n,phase,method,repeat,t_s,power_w,temp_c,sm_mhz,mem_mhz,clock_event_reasons\n");
+  }
+  S sample() {
+    S x{now_s() - t0, NAN, -1, 0, 0, 0}; unsigned p;
+    nvmlTemperature_t t = {}; t.version = nvmlTemperature_v1; t.sensorType = NVML_TEMPERATURE_GPU;
+    if (nvmlDeviceGetTemperatureV(dev, &t) == NVML_SUCCESS) x.temp = t.temperature;
+    if (nvmlDeviceGetPowerUsage(dev, &p) == NVML_SUCCESS) x.w = p / 1000.0;
+    nvmlDeviceGetClockInfo(dev, NVML_CLOCK_SM, &x.sm); nvmlDeviceGetClockInfo(dev, NVML_CLOCK_MEM, &x.mem);
+    unsigned long long r; if (nvmlDeviceGetCurrentClocksEventReasons(dev, &r) == NVML_SUCCESS) x.reasons = r;
+    return x;
   }
   void start() {
     if (!ok) return;
-    tmax = 0; clocks.clear(); wsum = 0; wn = 0; t0 = now_s(); if (energy_ok) nvmlDeviceGetTotalEnergyConsumption(dev, &e0);
+    buf.clear(); t0 = now_s(); if (energy_ok) nvmlDeviceGetTotalEnergyConsumption(dev, &e0);
     running = true;
-    th = std::thread([this] {
-      while (running) {
-        unsigned c, p;
-        nvmlTemperature_t t = {}; t.version = nvmlTemperature_v1; t.sensorType = NVML_TEMPERATURE_GPU;
-        if (nvmlDeviceGetTemperatureV(dev, &t) == NVML_SUCCESS && t.temperature > 0) tmax = std::max(tmax, (unsigned)t.temperature);
-        if (nvmlDeviceGetClockInfo(dev, NVML_CLOCK_SM, &c) == NVML_SUCCESS) clocks.push_back(c);
-        if (nvmlDeviceGetPowerUsage(dev, &p) == NVML_SUCCESS) { wsum += p / 1000.0; wn++; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      }
-    });
+    th = std::thread([this] { while (running) { buf.push_back(sample()); std::this_thread::sleep_for(std::chrono::milliseconds(period_ms)); } });
   }
-  // returns average watts over the window; fills max temperature and median SM clock
-  double stop(unsigned& tm, unsigned& mhz) {
-    tm = 0; mhz = 0;
-    if (!ok) return 0;
-    running = false; th.join();
-    double dt = now_s() - t0, w = wn ? wsum / wn : 0;
-    u64 e1; if (energy_ok && nvmlDeviceGetTotalEnergyConsumption(dev, &e1) == NVML_SUCCESS && e1 > e0) w = (e1 - e0) / 1000.0 / dt;
-    tm = tmax; if (!clocks.empty()) { std::sort(clocks.begin(), clocks.end()); mhz = clocks[clocks.size() / 2]; }
+  Window stop(int n, const char* phase, const char* method, int rep) {
+    Window w; if (!ok) return w;
+    running = false; th.join(); w.dt = now_s() - t0; w.nsamples = buf.size();
+    u64 e1;
+    if (energy_ok && nvmlDeviceGetTotalEnergyConsumption(dev, &e1) == NVML_SUCCESS && e1 > e0) { w.energy_j = (e1 - e0) / 1000.0; w.energy_src = "nvml_energy_counter"; }
+    else {  // trapezoidal integral of sampled power
+      double e = 0; int used = 0;
+      for (size_t i = 1; i < buf.size(); i++) if (std::isfinite(buf[i].w) && std::isfinite(buf[i - 1].w)) { e += 0.5 * (buf[i].w + buf[i - 1].w) * (buf[i].t - buf[i - 1].t); used++; }
+      if (used) { w.energy_j = e * w.dt / (buf.back().t - buf.front().t); w.energy_src = "sampled_power_integral"; }
+    }
+    w.watts = w.energy_j / w.dt;
+    std::vector<unsigned> sm, mem;
+    for (auto& x : buf) {
+      w.tmax = std::max(w.tmax, x.temp); w.reasons |= x.reasons; sm.push_back(x.sm); mem.push_back(x.mem);
+      if (csv) fprintf(csv, "%d,%s,%s,%d,%.3f,%s,%d,%u,%u,0x%llx\n", n, phase, method, rep, x.t, jnum(x.w).c_str(), x.temp, x.sm, x.mem, x.reasons);
+    }
+    if (!sm.empty()) { std::sort(sm.begin(), sm.end()); std::sort(mem.begin(), mem.end());
+      w.sm_med = sm[sm.size() / 2]; w.sm_min = sm.front(); w.sm_max = sm.back(); w.mem_med = mem[mem.size() / 2]; }
     return w;
   }
 };
 
-// ------------------------------------------------------------------ benchmark context
+// ------------------------------------------------------------------ benchmark context (one graph size)
 static const char* NAMES[4] = {"M1 CUDA cores  INT32 bitset+popc", "M2 CUDA cores  FP32 GEMM        ",
                                "M3 Tensor Cores FP16->FP32 GEMM  ", "M4 Tensor Cores INT8->INT32 GEMM "};
+static const char* IDS[4] = {"M1_cuda_int32_bitset_popc", "M2_cuda_fp32_gemm", "M3_tensor_fp16_fp32acc_gemm", "M4_tensor_int8_int32acc_gemm"};
 struct Ctx {
   int n, W; u64 seed, thr; uint32_t* bits; int8_t* a8; __half* a16; float* a32; int32_t* c8; float *c16, *c32;
   u64* rowsum[4]; Gemm g[3]; cudaStream_t st[4];
@@ -256,91 +318,204 @@ static int selftest() {
   return fails ? 1 : 0;
 }
 
-struct Rate { double solves_per_s, watts; unsigned tmax, mhz; };
-
 static void usage() {
   printf("trianglebench %s - triangle counting on CUDA cores vs Tensor Cores\n"
-         "usage: trianglebench [--n N] [--p P] [--seed S] [--seconds T] [--selftest]\n"
-         "  --n        nodes, multiple of 256 (default 16384)\n  --p        edge probability (default 0.5)\n"
-         "  --seed     graph seed (default 1)\n  --seconds  measuring time per phase (default 8)\n"
-         "  --selftest compare all methods with a CPU brute-force count and exit\n", VERSION);
+         "usage: trianglebench [options]\n"
+         "  --n LIST      node counts, multiples of 256, comma separated (default 8192)\n"
+         "  --p P         edge probability (default 0.5)\n"
+         "  --seed S      graph seed (default 1)\n"
+         "  --seconds T   measuring window per method and repetition (default 5)\n"
+         "  --repeats R   repetitions per graph size (default 5); method order rotates every repetition\n"
+         "  --warmup T    warm-up seconds per graph size (default 5)\n"
+         "  --cooldown T  idle seconds before every measuring window (default 0)\n"
+         "  --label TEXT  free text stored in the result file, e.g. system name or settings\n"
+         "  --out PREFIX  writes PREFIX.json and PREFIX.telemetry.csv (default tb_<gpu>_<utc time>)\n"
+         "  --selftest    compare all methods with a CPU brute-force count and exit\n", VERSION);
 }
 
 int main(int argc, char** argv) {
-  int n = 16384; double p = 0.5, secs = 8; u64 seed = 1; bool st = false;
+  std::vector<int> sizes{8192}; double p = 0.5, secs = 5, warm = 5, cool = 0; int reps = 5; u64 seed = 1; bool st = false;
+  std::string label, out, argline;
+  for (int i = 0; i < argc; i++) argline += (i ? " " : "") + std::string(argv[i]);
   for (int i = 1; i < argc; i++) {
-    std::string a = argv[i]; auto val = [&] { if (i + 1 >= argc) { usage(); exit(2); } return argv[++i]; };
-    if (a == "--n") n = atoi(val()); else if (a == "--p") p = atof(val()); else if (a == "--seed") seed = strtoull(val(), 0, 10);
-    else if (a == "--seconds") secs = atof(val()); else if (a == "--selftest") st = true; else { usage(); return a == "--help" || a == "-h" ? 0 : 2; }
+    std::string a = argv[i]; auto val = [&] { if (i + 1 >= argc) { usage(); exit(2); } return std::string(argv[++i]); };
+    if (a == "--n") { sizes.clear(); std::string v = val(); for (size_t q = 0, e; q < v.size(); q = e + 1) { e = v.find(',', q); if (e == std::string::npos) e = v.size(); sizes.push_back(atoi(v.substr(q, e - q).c_str())); } }
+    else if (a == "--p") p = atof(val().c_str()); else if (a == "--seed") seed = strtoull(val().c_str(), 0, 10);
+    else if (a == "--seconds") secs = atof(val().c_str()); else if (a == "--repeats") reps = atoi(val().c_str());
+    else if (a == "--warmup") warm = atof(val().c_str()); else if (a == "--cooldown") cool = atof(val().c_str());
+    else if (a == "--label") label = val(); else if (a == "--out") out = val(); else if (a == "--selftest") st = true;
+    else { usage(); return a == "--help" || a == "-h" ? 0 : 2; }
   }
   cudaDeviceProp pr; CK(cudaGetDeviceProperties(&pr, 0));
   int drv = 0, rt = 0; CK(cudaDriverGetVersion(&drv)); CK(cudaRuntimeGetVersion(&rt));
-  Telemetry tel; tel.init(0);
-  char drvs[80] = "n/a"; if (tel.ok) nvmlSystemGetDriverVersion(drvs, sizeof drvs);
-  printf("trianglebench %s | %s (sm_%d%d, %d SMs, %.1f GB) | driver %s | CUDA runtime %d.%d\n", VERSION, pr.name, pr.major, pr.minor,
-         pr.multiProcessorCount, pr.totalGlobalMem / 1e9, drvs, rt / 1000, (rt % 1000) / 10);
-  if (st) return selftest();
-  if (n < 256 || n % 256 || n >= (1 << 24) || p < 0 || p > 1) { fprintf(stderr, "invalid --n (multiple of 256) or --p (0..1)\n"); return 2; }
-  size_t need = (size_t)n * n * 19 + (100ull << 20), freeb, totb; CK(cudaMemGetInfo(&freeb, &totb));
-  if (need > freeb) { fprintf(stderr, "need %.1f GB GPU memory, %.1f GB free - use a smaller --n\n", need / 1e9, freeb / 1e9); return 2; }
-
-  Ctx x; x.init(n, p, seed);
-  const double ops = 2.0 * n * (double)n * n;  // operations of one dense A*A, used as common yardstick for all methods
-  // reference = M4, then every method must reproduce it node by node
-  x.solve(3); CK(cudaDeviceSynchronize());
-  std::vector<u64> ref = x.result(3);
-  double T = (double)total(ref), nc3 = (double)n * (n - 1) * (n - 2) / 6;
-  double* d_tr; float* d_cs; u64* d_deg; CK(cudaMalloc(&d_tr, 8)); CK(cudaMalloc(&d_cs, 4)); CK(cudaMalloc(&d_deg, 8));
-  CK(cudaMemset(d_tr, 0, 8)); CK(cudaMemset(d_cs, 0, 4)); CK(cudaMemset(d_deg, 0, 8));
-  k_stats<<<(n + 255) / 256, 256>>>(x.bits, x.rowsum[3], n, x.W, d_tr, d_cs, d_deg); CK(cudaDeviceSynchronize());
-  double triples; float csum; u64 degsum;
-  CK(cudaMemcpy(&triples, d_tr, 8, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(&csum, d_cs, 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(&degsum, d_deg, 8, cudaMemcpyDeviceToHost));
-  printf("graph G(n=%d, p=%.4f, seed=%llu): %llu edges, %.0f triangles (theory C(n,3)p^3 = %.0f, ratio %.5f)\n",
-         n, p, seed, degsum / 2, T, nc3 * p * p * p, T / (nc3 * p * p * p));
-  printf("clustering: global (FP64) %.6f, mean local (FP32) %.6f, theory p = %.6f\n\n", triples > 0 ? 3 * T / triples : 0.0, csum / n, p);
-
-  // warm-up so that every method is measured on a warm card (power limit and boost are temperature dependent)
-  { double t0 = now_s(); while (now_s() - t0 < 3) { x.solve(3); CK(cudaStreamSynchronize(x.st[3])); } }
-
-  printf("Phase 1: each method alone (%.0f s each). 'eq.TOPS' = 2n^3 / time, the work of a dense A*A.\n", secs);
-  printf("%-34s %9s %8s %7s %6s %5s %8s %8s  %s\n", "method", "s/solve", "eq.TOPS", "W avg", "T max", "MHz", "TOPS/W", "J/solve", "check");
-  Rate alone[4]; int bad = 0;
-  for (int m = 0; m < 4; m++) {
-    x.solve(m); CK(cudaStreamSynchronize(x.st[m]));
-    tel.start(); double t0 = now_s(); int k = 0;
-    while (now_s() - t0 < secs || k < 2) { x.solve(m); CK(cudaStreamSynchronize(x.st[m])); k++; }
-    double dt = now_s() - t0; unsigned tm, mhz; double w = tel.stop(tm, mhz);
-    bool eq = x.result(m) == ref; bad += !eq;
-    double s = dt / k, tops = ops / s / 1e12;
-    alone[m] = {k / dt, w, tm, mhz};
-    printf("%-34s %9.4f %8.2f %7.1f %6u %5u %8.3f %8.1f  %s\n", NAMES[m], s, tops, w, tm, mhz, w > 0 ? tops / w : 0, w * s, eq ? "OK" : "MISMATCH");
-    if (m == 0)  // native rate: one AND + one POPC + one ADD per 32-bit word pair, n*n*(n/32) word pairs per solve
-      printf("%-34s native: %.2f T popc/s, %.2f T int32 ops/s (AND+POPC+ADD); 1 popc = 32 multiply-adds of 0/1 values\n", "",
-             (double)n * n * x.W / s / 1e12, 3.0 * n * n * x.W / s / 1e12);
+  if (st) {
+    printf("trianglebench %s | %s (sm_%d%d, %d SMs) | CUDA runtime %d.%d\n", VERSION, pr.name, pr.major, pr.minor, pr.multiProcessorCount, rt / 1000, (rt % 1000) / 10);
+    return selftest();
   }
-
-  printf("\nPhase 2: all four methods at the same time, one CUDA stream and host thread each (%.0f s)\n", secs);
-  std::atomic<bool> go{false}; int cnt[4] = {}; bool eqc[4] = {};
-  std::vector<std::thread> th;
-  tel.start(); double t0 = now_s();
-  for (int m = 0; m < 4; m++) th.emplace_back([&, m] {
-    CK(cudaSetDevice(0));
-    while (!go) std::this_thread::yield();
-    while (now_s() - t0 < secs || cnt[m] < 1) { x.solve(m); CK(cudaStreamSynchronize(x.st[m])); cnt[m]++; }
-    eqc[m] = x.result(m) == ref;
-  });
-  t0 = now_s(); go = true;
-  for (auto& t : th) t.join();
-  double dt = now_s() - t0; unsigned tm, mhz; double w = tel.stop(tm, mhz);
-  printf("%-34s %9s %9s %7s  %s\n", "method", "alone/s", "parallel/s", "share", "check");
-  double sum = 0, tops_all = 0;
-  for (int m = 0; m < 4; m++) {
-    double r = cnt[m] / dt, sh = r / alone[m].solves_per_s; sum += sh; tops_all += r * ops / 1e12; bad += !eqc[m];
-    printf("%-34s %9.3f %9.3f %7.2f  %s\n", NAMES[m], alone[m].solves_per_s, r, sh, eqc[m] ? "OK" : "MISMATCH");
+  if (p < 0 || p > 1 || reps < 1 || secs <= 0) { fprintf(stderr, "invalid --p, --repeats or --seconds\n"); return 2; }
+  for (int n : sizes) {
+    if (n < 256 || n % 256 || n >= (1 << 24)) { fprintf(stderr, "invalid --n %d (multiple of 256 required)\n", n); return 2; }
+    size_t need = (size_t)n * n * 19 + (200ull << 20), freeb, totb; CK(cudaMemGetInfo(&freeb, &totb));
+    if (need > freeb) { fprintf(stderr, "n=%d needs %.1f GB GPU memory, %.1f GB free - use a smaller --n\n", n, need / 1e9, freeb / 1e9); return 2; }
   }
-  printf("all four together: %.2f eq.TOPS, %.1f W avg, T max %u C, %u MHz, %.3f TOPS/W\n", tops_all, w, tm, mhz, w > 0 ? tops_all / w : 0);
-  printf("sum of shares %.2f  (1.00 = no gain from running in parallel; >1 = units overlap; <1 = they get in each other's way)\n", sum);
-  printf("\nresult: %s\n", bad ? "MISMATCH - results differ between methods" : "all methods agree on every node");
-  x.release();
+  std::string gpu = pr.name, tag;
+  for (char c : gpu) tag += isalnum((unsigned char)c) ? (char)tolower(c) : '-';
+  std::string t_start = utc_now();
+  if (out.empty()) { std::string ts = t_start; ts.erase(std::remove(ts.begin(), ts.end(), ':'), ts.end()); ts.erase(std::remove(ts.begin(), ts.end(), '-'), ts.end()); out = "tb_" + tag + "_" + ts; }
+  FILE* csv = fopen((out + ".telemetry.csv").c_str(), "w");
+  if (!csv) { fprintf(stderr, "cannot write %s.telemetry.csv\n", out.c_str()); return 2; }
+  Telemetry tel; tel.init(0, csv);
+
+  // ---------------- provenance (everything that can change the numbers)
+  char drvs[80] = "", uuid[96] = ""; unsigned pl = 0, smax = 0, mmax = 0, pcig = 0, pciw = 0; nvmlEnableState_t pers, eccc, eccp; int gpcoff = 0, memoff = 0;
+  bool v_pl = false, v_smax = false, v_mmax = false, v_pci = false, v_pers = false, v_ecc = false, v_gpc = false, v_mem = false;
+  if (tel.ok) {
+    nvmlSystemGetDriverVersion(drvs, sizeof drvs); nvmlDeviceGetUUID(tel.dev, uuid, sizeof uuid);
+    v_pl = nvmlDeviceGetEnforcedPowerLimit(tel.dev, &pl) == NVML_SUCCESS;
+    v_smax = nvmlDeviceGetMaxClockInfo(tel.dev, NVML_CLOCK_SM, &smax) == NVML_SUCCESS;
+    v_mmax = nvmlDeviceGetMaxClockInfo(tel.dev, NVML_CLOCK_MEM, &mmax) == NVML_SUCCESS;
+    v_pci = !pr.integrated && nvmlDeviceGetCurrPcieLinkGeneration(tel.dev, &pcig) == NVML_SUCCESS && nvmlDeviceGetCurrPcieLinkWidth(tel.dev, &pciw) == NVML_SUCCESS;
+    v_pers = nvmlDeviceGetPersistenceMode(tel.dev, &pers) == NVML_SUCCESS;
+    v_ecc = nvmlDeviceGetEccMode(tel.dev, &eccc, &eccp) == NVML_SUCCESS;
+    v_gpc = nvmlDeviceGetGpcClkVfOffset(tel.dev, &gpcoff) == NVML_SUCCESS;
+    v_mem = nvmlDeviceGetMemClkVfOffset(tel.dev, &memoff) == NVML_SUCCESS;
+  }
+  struct utsname un; uname(&un);
+  printf("trianglebench %s (%s) | %s (sm_%d%d, %d SMs, %.1f GB) | driver %s | CUDA runtime %d.%d | cuBLASLt %zu | %s %s\n", VERSION, GIT_COMMIT,
+         pr.name, pr.major, pr.minor, pr.multiProcessorCount, pr.totalGlobalMem / 1e9, drvs, rt / 1000, (rt % 1000) / 10, cublasLtGetVersion(), un.sysname, un.machine);
+  printf("power limit %s W | ECC %s | GPC offset %s MHz | mem offset %s MHz | telemetry: %s\n", v_pl ? jnum(pl / 1000.0).c_str() : "n/a",
+         v_ecc ? (eccc == NVML_FEATURE_ENABLED ? "on" : "off") : "n/a", v_gpc ? std::to_string(gpcoff).c_str() : "n/a", v_mem ? std::to_string(memoff).c_str() : "n/a",
+         !tel.ok ? "unavailable" : tel.energy_ok ? "NVML energy counter" : "sampled power (no energy counter)");
+
+  std::string J = "{\"schema\":" + jstr(SCHEMA) + ",\"tool\":{\"name\":\"trianglebench\",\"version\":" + jstr(VERSION) + ",\"git_commit\":" + jstr(GIT_COMMIT) +
+    ",\"build_arch\":" + jstr(BUILD_ARCH) + ",\"nvcc\":\"" + std::to_string(__CUDACC_VER_MAJOR__) + "." + std::to_string(__CUDACC_VER_MINOR__) + "." +
+    std::to_string(__CUDACC_VER_BUILD__) + "\",\"host_compiler\":" + jstr(__VERSION__) + ",\"command_line\":" + jstr(argline) + "}";
+  J += ",\"label\":" + jstr(label) + ",\"start_utc\":" + jstr(t_start);
+  J += ",\"system\":{\"os\":" + jstr(un.sysname) + ",\"kernel\":" + jstr(un.release) + ",\"machine\":" + jstr(un.machine) + "}";
+  J += ",\"gpu\":{\"name\":" + jstr(pr.name) + ",\"uuid\":" + jstr(uuid) + ",\"compute_capability\":\"" + std::to_string(pr.major) + "." + std::to_string(pr.minor) +
+    "\",\"sm_count\":" + std::to_string(pr.multiProcessorCount) + ",\"memory_bytes\":" + std::to_string(pr.totalGlobalMem) +
+    ",\"integrated\":" + (pr.integrated ? "true" : "false") + ",\"driver\":" + jstr(drvs) + ",\"cuda_driver_api\":" + std::to_string(drv) +
+    ",\"cuda_runtime\":" + std::to_string(rt) + ",\"cublaslt\":" + std::to_string(cublasLtGetVersion()) +
+    ",\"power_limit_w\":" + (v_pl ? jnum(pl / 1000.0) : "null") + ",\"max_sm_clock_mhz\":" + jint(smax, v_smax) + ",\"max_mem_clock_mhz\":" + jint(mmax, v_mmax) +
+    ",\"pcie_gen\":" + jint(pcig, v_pci) + ",\"pcie_width\":" + jint(pciw, v_pci) + ",\"persistence_mode\":" + (v_pers ? (pers == NVML_FEATURE_ENABLED ? "true" : "false") : "null") +
+    ",\"ecc_enabled\":" + (v_ecc ? (eccc == NVML_FEATURE_ENABLED ? "true" : "false") : "null") + ",\"gpc_clock_offset_mhz\":" + jint(gpcoff, v_gpc) +
+    ",\"mem_clock_offset_mhz\":" + jint(memoff, v_mem) + "}";
+  J += ",\"telemetry\":{\"available\":" + std::string(tel.ok ? "true" : "false") + ",\"energy_counter\":" + (tel.energy_ok ? "true" : "false") +
+    ",\"sample_period_ms\":" + std::to_string(tel.period_ms) + ",\"file\":" + jstr(out + ".telemetry.csv") + "}";
+  J += ",\"parameters\":{\"p\":" + jnum(p) + ",\"seed\":" + std::to_string(seed) + ",\"seconds\":" + jnum(secs) + ",\"repeats\":" + std::to_string(reps) +
+    ",\"warmup_s\":" + jnum(warm) + ",\"cooldown_s\":" + jnum(cool) + ",\"order\":\"rotating: repetition r runs methods (r, r+1, r+2, r+3) mod 4\"}";
+  J += ",\"runs\":[";
+
+  int bad = 0;
+  for (size_t si = 0; si < sizes.size(); si++) {
+    const int n = sizes[si];
+    Ctx x; x.init(n, p, seed);
+    const double ops = 2.0 * n * (double)n * n;  // dense A*A, the common yardstick
+    x.solve(3); CK(cudaDeviceSynchronize());
+    std::vector<u64> ref = x.result(3);
+    double T = (double)total(ref), nc3 = (double)n * (n - 1) * (n - 2) / 6;
+    double* d_tr; float* d_cs; u64* d_deg; CK(cudaMalloc(&d_tr, 8)); CK(cudaMalloc(&d_cs, 4)); CK(cudaMalloc(&d_deg, 8));
+    CK(cudaMemset(d_tr, 0, 8)); CK(cudaMemset(d_cs, 0, 4)); CK(cudaMemset(d_deg, 0, 8));
+    k_stats<<<(n + 255) / 256, 256>>>(x.bits, x.rowsum[3], n, x.W, d_tr, d_cs, d_deg); CK(cudaDeviceSynchronize());
+    double triples; float csum; u64 degsum;
+    CK(cudaMemcpy(&triples, d_tr, 8, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(&csum, d_cs, 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(&degsum, d_deg, 8, cudaMemcpyDeviceToHost));
+    cudaFree(d_tr); cudaFree(d_cs); cudaFree(d_deg);
+    double gcc = triples > 0 ? 3 * T / triples : 0.0;
+    printf("\ngraph G(n=%d, p=%.4f, seed=%llu): %llu edges, %.0f triangles (theory C(n,3)p^3 = %.0f, ratio %.5f)\n",
+           n, p, seed, degsum / 2, T, nc3 * p * p * p, T / (nc3 * p * p * p));
+    printf("clustering: global (FP64) %.6f, mean local (FP32) %.6f, theory p = %.6f\n", gcc, csum / n, p);
+
+    { double t0 = now_s(); while (now_s() - t0 < warm) { x.solve(3); CK(cudaStreamSynchronize(x.st[3])); x.solve(0); CK(cudaStreamSynchronize(x.st[0])); } }
+
+    struct Meas { std::vector<double> solve_s; Window w; bool ok; double tops, s_per_solve, j_per_solve; };
+    std::vector<Meas> alone[4]; std::vector<std::vector<int>> par_cnt; std::vector<Window> par_w; std::vector<double> par_tops, par_sum;
+    for (int r = 0; r < reps; r++) {
+      printf("repetition %d/%d ...", r + 1, reps); fflush(stdout);
+      double rate[4];
+      for (int q = 0; q < 4; q++) {  // phase 1: each method alone, rotating order
+        const int m = (r + q) % 4;
+        if (cool > 0) std::this_thread::sleep_for(std::chrono::milliseconds((int)(cool * 1000)));
+        x.solve(m); CK(cudaStreamSynchronize(x.st[m]));
+        Meas M; tel.start(); double t0 = now_s(), t = t0;
+        while (t - t0 < secs || M.solve_s.size() < 2) { x.solve(m); CK(cudaStreamSynchronize(x.st[m])); double t1 = now_s(); M.solve_s.push_back(t1 - t); t = t1; }
+        double dt = t - t0; M.w = tel.stop(n, "alone", IDS[m], r + 1);
+        M.ok = x.result(m) == ref; bad += !M.ok;
+        M.s_per_solve = dt / M.solve_s.size(); M.tops = ops / M.s_per_solve / 1e12; M.j_per_solve = M.w.energy_j / M.solve_s.size();
+        rate[m] = M.solve_s.size() / dt; alone[m].push_back(M);
+      }
+      // phase 2: all four at the same time
+      if (cool > 0) std::this_thread::sleep_for(std::chrono::milliseconds((int)(cool * 1000)));
+      std::atomic<bool> go{false}; std::vector<int> cnt(4, 0); bool eqc[4] = {};
+      std::vector<std::thread> th; double t0 = 0;
+      tel.start();
+      for (int m = 0; m < 4; m++) th.emplace_back([&, m] {
+        CK(cudaSetDevice(0));
+        while (!go) std::this_thread::yield();
+        while (now_s() - t0 < secs || cnt[m] < 1) { x.solve(m); CK(cudaStreamSynchronize(x.st[m])); cnt[m]++; }
+        eqc[m] = x.result(m) == ref;
+      });
+      t0 = now_s(); go = true;
+      for (auto& t : th) t.join();
+      double dt = now_s() - t0; Window w = tel.stop(n, "parallel", "all", r + 1);
+      double tops = 0, sum = 0;
+      for (int m = 0; m < 4; m++) { tops += cnt[m] / dt * ops / 1e12; sum += cnt[m] / dt / rate[m]; bad += !eqc[m]; }
+      par_cnt.push_back(cnt); par_w.push_back(w); par_tops.push_back(tops); par_sum.push_back(sum);
+      printf(" done\n");
+    }
+
+    // ---------------- summary for this size
+    printf("\nn=%d: %d repetitions x %.0f s, mean +- 95%% CI (Student t). eq.TOPS = 2n^3/time (work of a dense A*A)\n", n, reps, secs);
+    printf("%-34s %16s %8s %6s %6s %5s %8s %10s %5s\n", "method", "eq.TOPS", "CV", "W", "T max", "MHz", "TOPS/W", "J/solve", "check");
+    J += std::string(si ? "," : "") + "{\"n\":" + std::to_string(n) + ",\"graph\":{\"edges\":" + std::to_string(degsum / 2) + ",\"triangles\":" + std::to_string(total(ref)) +
+      ",\"triangles_expected\":" + jnum(nc3 * p * p * p) + ",\"global_clustering_fp64\":" + jnum(gcc) + ",\"mean_local_clustering_fp32\":" + jnum(csum / n) + "}";
+    J += ",\"methods\":[";
+    for (int m = 0; m < 4; m++) {
+      std::vector<double> v_tops, v_s, v_w, v_j, v_tpw; int tmax = -1; bool ok = true;
+      for (auto& M : alone[m]) { v_tops.push_back(M.tops); v_s.push_back(M.s_per_solve); v_w.push_back(M.w.watts); v_j.push_back(M.j_per_solve);
+        v_tpw.push_back(M.tops / M.w.watts); tmax = std::max(tmax, M.w.tmax); ok &= M.ok; }
+      Stats s_t = stats(v_tops), s_w = stats(v_w), s_j = stats(v_j), s_e = stats(v_tpw);
+      std::vector<double> mhz; for (auto& M : alone[m]) mhz.push_back(M.w.sm_med);
+      printf("%-34s %8.2f +-%5.2f %7.2f%% %6.1f %6d %5.0f %8.3f %10.4g %5s\n", NAMES[m], s_t.mean, s_t.ci95, 100 * s_t.cv, s_w.mean, tmax,
+             stats(mhz).median, s_e.mean, s_j.mean, ok ? "OK" : "FAIL");
+      if (m == 0) { double s = stats(v_s).mean; printf("%-34s native: %.3f T popc/s (AND+POPC+ADD per 32-bit word pair)\n", "", (double)n * n * x.W / s / 1e12); }
+      J += std::string(m ? "," : "") + "{\"id\":" + jstr(IDS[m]) + ",\"verified\":" + (ok ? "true" : "false");
+      if (m > 0) J += ",\"cublaslt_algo\":{\"id\":" + std::to_string(x.g[m - 1].algo_id) + ",\"tile_id\":" + std::to_string(x.g[m - 1].tile_id) +
+                      ",\"stages_id\":" + std::to_string(x.g[m - 1].stages_id) + "}";
+      J += ",\"summary\":{\"eq_tops\":" + jstats(s_t) + ",\"seconds_per_solve\":" + jstats(stats(v_s)) + ",\"watts\":" + jstats(s_w) +
+           ",\"joule_per_solve\":" + jstats(s_j) + ",\"eq_tops_per_watt\":" + jstats(s_e) + "},\"repetitions\":[";
+      for (size_t r = 0; r < alone[m].size(); r++) {
+        auto& M = alone[m][r];
+        J += std::string(r ? "," : "") + "{\"repeat\":" + std::to_string(r + 1) + ",\"position_in_order\":" + std::to_string((m - (int)r % 4 + 4) % 4 + 1) +
+          ",\"solves\":" + std::to_string(M.solve_s.size()) + ",\"window_s\":" + jnum(M.w.dt) + ",\"seconds_per_solve\":" + jnum(M.s_per_solve) +
+          ",\"eq_tops\":" + jnum(M.tops) + ",\"energy_j\":" + jnum(M.w.energy_j) + ",\"energy_source\":" + jstr(M.w.energy_src) + ",\"watts\":" + jnum(M.w.watts) +
+          ",\"joule_per_solve\":" + jnum(M.j_per_solve) + ",\"temp_max_c\":" + jint(M.w.tmax, M.w.tmax >= 0) + ",\"sm_mhz_median\":" + std::to_string(M.w.sm_med) +
+          ",\"sm_mhz_min\":" + std::to_string(M.w.sm_min) + ",\"sm_mhz_max\":" + std::to_string(M.w.sm_max) + ",\"mem_mhz_median\":" + std::to_string(M.w.mem_med) +
+          ",\"clock_event_reasons_or\":\"0x" + [&] { char b[24]; snprintf(b, sizeof b, "%llx", M.w.reasons); return std::string(b); }() + "\",\"telemetry_samples\":" +
+          std::to_string(M.w.nsamples) + ",\"solve_s\":[";
+        for (size_t k = 0; k < M.solve_s.size(); k++) J += (k ? "," : "") + jnum(M.solve_s[k]);
+        J += "]}";
+      }
+      J += "]}";
+    }
+    Stats s_pt = stats(par_tops), s_ps = stats(par_sum); std::vector<double> pw; int ptmax = -1;
+    for (auto& w : par_w) { pw.push_back(w.watts); ptmax = std::max(ptmax, w.tmax); }
+    printf("%-34s %8.2f +-%5.2f %7.2f%% %6.1f %6d   sum of shares %.3f +- %.3f (1 = no gain from parallel execution)\n", "all four in parallel", s_pt.mean, s_pt.ci95,
+           100 * s_pt.cv, stats(pw).mean, ptmax, s_ps.mean, s_ps.ci95);
+    J += "],\"parallel\":{\"summary\":{\"eq_tops\":" + jstats(s_pt) + ",\"sum_of_shares\":" + jstats(s_ps) + ",\"watts\":" + jstats(stats(pw)) + "},\"repetitions\":[";
+    for (size_t r = 0; r < par_w.size(); r++) {
+      J += std::string(r ? "," : "") + "{\"repeat\":" + std::to_string(r + 1) + ",\"solves\":[" + std::to_string(par_cnt[r][0]) + "," + std::to_string(par_cnt[r][1]) + "," +
+        std::to_string(par_cnt[r][2]) + "," + std::to_string(par_cnt[r][3]) + "],\"window_s\":" + jnum(par_w[r].dt) + ",\"eq_tops\":" + jnum(par_tops[r]) +
+        ",\"sum_of_shares\":" + jnum(par_sum[r]) + ",\"energy_j\":" + jnum(par_w[r].energy_j) + ",\"watts\":" + jnum(par_w[r].watts) +
+        ",\"temp_max_c\":" + jint(par_w[r].tmax, par_w[r].tmax >= 0) + ",\"sm_mhz_median\":" + std::to_string(par_w[r].sm_med) + "}";
+    }
+    J += "]}}";
+    x.release();
+  }
+  J += "],\"end_utc\":" + jstr(utc_now()) + ",\"all_verified\":" + (bad ? "false" : "true") + "}\n";
+  fclose(csv);
+  FILE* f = fopen((out + ".json").c_str(), "w");
+  if (!f || fputs(J.c_str(), f) < 0) { fprintf(stderr, "cannot write %s.json\n", out.c_str()); return 2; }
+  fclose(f);
+  printf("\nresult: %s\nwritten: %s.json, %s.telemetry.csv\n", bad ? "MISMATCH - results differ between methods" : "all methods agree on every node", out.c_str(), out.c_str());
   return bad ? 1 : 0;
 }
