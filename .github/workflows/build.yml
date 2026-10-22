@@ -27,6 +27,19 @@ jobs:
       - name: analysis script
         run: python3 analysis/summarize.py results/*.json --csv /tmp/all.csv
 
+  peak:
+    # Builds the peak-throughput tools in peak/ (cuBLASLt, cuSPARSELt, CUDA Tile) for sm_86 and sm_121; no GPU needed.
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.4.3-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: build peak tools
+        shell: bash
+        run: |
+          apt-get update -qq && apt-get install -y -qq make python3 libcusparselt0-dev-cuda-13
+          make -C peak ARCH="-gencode arch=compute_86,code=sm_86 -gencode arch=compute_121,code=sm_121"
+          python3 -m py_compile peak/cutlasspeak.py peak/gb10run.py peak/benchrun.py
+
   jupyter:
     # Builds the JupyterLab image and executes the analysis notebook on the reference data (no GPU needed).
     runs-on: ubuntu-24.04

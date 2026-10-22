@@ -4,3 +4,6 @@ trianglebench-cpu
 work/
 export/
 .ipynb_checkpoints/
+peak/tensorpeak
+peak/sparsepeak
+peak/fusedtri

@@ -1,0 +1,18 @@
+Format          n Kand.    bester  Heurist. schlecht.  (Autotuning, TFLOPS/TOPS)
+fp16         8192   347     91.88     91.88      6.47  tile=412 stages=35
+RESULT fp16_8192 97.97 t=1792688954.3-1792688966.4
+int8         8192    58    194.37    152.02     13.37  tile=20 stages=18
+RESULT int8_8192 194.96 t=1792688971.7-1792688983.7
+fp8          8192   400    222.00    222.00     12.86  tile=23 stages=36
+RESULT fp8_8192 220.75 t=1792689009.4-1792689021.4
+VERIFY fp8_8192 OK (64 Stichproben, max. rel. Fehler 1.02e-05)
+nvfp4        8192     8    377.36    377.36     92.34  tile=20 stages=37
+RESULT nvfp4_8192 374.44 t=1792689025.0-1792689037.0
+VERIFY nvfp4_8192 OK (64 Stichproben, max. rel. Fehler 9.51e-04)
+OK tensorpeak fertig
+Leerlauf 52 C, 4.0 W
+Test                   Wert  T max  P Med  P max   MHz Util  Wert/W    J/Op  n
+fp16_8192             97.97     78   82.7   83.1  2509   96   1.185   0.928  22
+int8_8192            194.96     82   91.1   91.9  2483   96   2.139   0.514  22
+fp8_8192             220.75     81   92.6   93.0  2489   96   2.385   0.461  22
+nvfp4_8192           374.44     83   92.5   93.2  2463   96   4.046   0.272  22

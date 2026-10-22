@@ -1,0 +1,24 @@
+Klasse        n Kand.    bester   Verify  Kernel
+int8       8192    56    118.02   passed  cutlass_tensorop_i16832gemm_s8_256x128_64x3_tn_align16
+int8      12288    56    114.46   passed  cutlass_tensorop_i16832gemm_s8_256x128_64x3_tn_align16
+int4       8192    24    231.27   passed  cutlass_tensorop_s4_i16864gemm_s4_256x128_128x3_tn_align32
+int4      12288    24    236.61   passed  cutlass_tensorop_s4_i16864gemm_s4_256x128_128x3_tn_align32
+sp_int8    8192    10    148.73 not_verified  cutlass_tensorop_i16864spgemm_s8_128x128_128x3_tn_align16
+sp_int8   12288    10    129.41 not_verified  cutlass_tensorop_s8_i16864spgemm_s8_128x128_128x3_tn_align16
+sp_int4    8192    10    313.40 not_verified  cutlass_tensorop_s4_i168128spgemm_s4_128x128_256x3_tn_align32
+sp_int4   12288    10    277.82 not_verified  cutlass_tensorop_s4_i168128spgemm_s4_256x64_256x3_tn_align32
+sp_fp16    8192    60     94.18 not_verified  cutlass_tensorop_f16_s16832spgemm_f16_128x128_64x3_tn_align8
+sp_fp16   12288    60     90.65 not_verified  cutlass_tensorop_h16832spgemm_128x128_64x3_nt_align8
+OK cutlasspeak fertig
+Leerlauf   52 C, 16.3 W
+Test                      Wert  T max  P Med  P max  SM MHz  Util   PCIe   Wert/W  Drossel
+int8_8192               112.78     87  139.8  140.0    1260   100  G3x16    0.807  0x0000000000000004
+int8_12288              114.71     87  139.8  140.2    1230   100  G3x16    0.821  0x0000000000000004
+int4_8192               233.79     87  139.6  140.1    1275   100  G3x16    1.675  0x0000000000000004
+int4_12288              233.64     86  139.8  140.0    1230   100  G3x16    1.671  0x0000000000000004
+sp_int8_8192            144.30     85  139.8  140.1     945   100  G3x16    1.032  0x0000000000000004
+sp_int8_12288           131.81     84  139.6  140.0     825   100  G3x16    0.944  0x0000000000000004
+sp_int4_8192            295.73     84  139.8  140.2    1020   100  G3x16    2.115  0x0000000000000004
+sp_int4_12288           275.43     84  139.8  142.3     975   100  G3x16    1.969  0x0000000000000004
+sp_fp16_8192             94.11     85  139.9  141.8    1155   100  G3x16    0.673  0x0000000000000004
+sp_fp16_12288            90.76     86  139.8  139.9    1260   100  G3x16    0.649  0x0000000000000004

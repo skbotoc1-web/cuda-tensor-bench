@@ -113,6 +113,13 @@ the GB10 CPU ~48 % of its estimated NEON/SVE2 peak - its OpenBLAS 0.3.26 has no 
   as on Ampere.
 * The GB10 was not run at n = 16384 because of the vLLM memory reservation.
 
+### Peak throughput vs. datasheet
+
+How far are these numbers from the datasheet? Separate tools in [`peak/`](peak) measure dense, 2:4-sparse,
+FP8 and NVFP4 GEMM peaks on both GPUs. Headline: with vLLM stopped, the DGX Spark reaches 374 TFLOPS NVFP4 dense
+and 494 TFLOPS FP4 with 2:4 sparsity, about half of the advertised "1 PFLOP FP4 with sparsity". The folder also
+contains a CUDA Tile prototype that fuses the trianglebench kernel; it wins only for small matrices.
+
 ## Build and run
 
 Requirements: Linux (x86_64 or aarch64), NVIDIA GPU with compute capability 7.5 or newer,

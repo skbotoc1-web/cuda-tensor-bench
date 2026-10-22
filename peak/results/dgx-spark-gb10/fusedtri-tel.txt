@@ -1,0 +1,22 @@
+fusedtri | Dichte 0.050 | Tile 128x128x128 | eqTOPS = 2 n^3 / Zeit
+CHECK n=4096 Dreiecke=1438830 fused!=unfused:0 Stichproben!=Referenz:0/32 -> OK
+RESULT unfused_4096 128.18 t=1792689457.5-1792689467.5
+RESULT fused_4096 177.96 t=1792689467.5-1792689477.5
+INFO n=4096 nur GEMM 177.21 eqTOPS
+CHECK n=8192 Dreiecke=11489336 fused!=unfused:0 Stichproben!=Referenz:0/32 -> OK
+RESULT unfused_8192 167.21 t=1792689477.8-1792689487.8
+RESULT fused_8192 158.45 t=1792689487.8-1792689497.8
+INFO n=8192 nur GEMM 195.91 eqTOPS
+CHECK n=16384 Dreiecke=91579844 fused!=unfused:0 Stichproben!=Referenz:0/32 -> OK
+RESULT unfused_16384 190.98 t=1792689499.7-1792689509.7
+RESULT fused_16384 104.30 t=1792689509.7-1792689519.8
+INFO n=16384 nur GEMM 207.84 eqTOPS
+OK fusedtri
+Leerlauf 55 C, 4.1 W
+Test                   Wert  T max  P Med  P max   MHz Util  Wert/W    J/Op  n
+unfused_4096         128.18     66   56.2   56.5  2535   96   2.280   0.060  18
+fused_4096           177.96     70   67.0   67.3  2535   96   2.655   0.052  18
+unfused_8192         167.21     71   64.2   64.5  2522   96   2.603   0.422  17
+fused_8192           158.45     71   62.0   62.6  2535   96   2.558   0.430  18
+unfused_16384        190.98     72   58.6   58.9  2502   96   3.257   2.700  18
+fused_16384          104.30     70   48.5   50.2  2535   96   2.153   4.086  18

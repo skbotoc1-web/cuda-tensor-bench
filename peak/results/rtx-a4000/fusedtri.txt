@@ -1,0 +1,12 @@
+fusedtri | density 0.050 | tile 128x128x128 | eqTOPS = 2 n^3 / time
+CHECK n=4096 triangles=1438830 fused!=unfused:0 samples!=reference:0/32 -> OK
+INFO n=4096 GEMM only 142.44 eqTOPS
+CHECK n=8192 triangles=11489336 fused!=unfused:0 samples!=reference:0/32 -> OK
+INFO n=8192 GEMM only 155.00 eqTOPS
+OK fusedtri
+idle       34 C, 13.5 W
+test                     value  T max  P Med  P max  SM MHz  Util   PCIe  value/W  throttle
+unfused_4096            111.07     48  109.7  111.2    1620   100  G3x16    1.013  0x0000000000000004
+fused_4096               58.05     57  113.6  114.6    1800   100  G3x16    0.511  0x0000000000000004
+unfused_8192            124.80     61  108.7  122.2    1545   100  G3x16    1.148  0x0000000000000004
+fused_8192               58.22     67  116.9  118.4    1770   100  G3x16    0.498  0x0000000000000004

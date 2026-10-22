@@ -1,0 +1,32 @@
+Format          n Kand.    bester  Heurist. schlecht.  (Autotuning, TFLOPS/TOPS)
+tf32         8192    98     42.34     42.34      6.20  tile=23 stages=3
+tf32        16384    98     45.31     42.30      5.60  tile=20 stages=9
+fp16         8192   347     95.78     94.40      6.41  tile=20 stages=15
+fp16        16384   347     93.96     93.96      6.68  tile=412 stages=35
+bf16         8192   331     97.05     97.05      6.41  tile=412 stages=35
+bf16        16384   331     87.44     87.44      6.69  tile=412 stages=35
+int8         8192    58    189.61    144.75     13.26  tile=20 stages=18
+int8        16384    58    163.42    158.21     13.45  tile=23 stages=15
+fp8          8192   400    220.98    211.42     13.13  tile=20 stages=15
+VERIFY fp8_8192 OK (64 Stichproben, max. rel. Fehler 1.02e-05)
+fp8         16384   400    218.23    216.80     14.79  tile=467 stages=36
+VERIFY fp8_16384 OK (64 Stichproben, max. rel. Fehler 1.02e-05)
+nvfp4        8192     8    377.62    343.99    100.89  tile=20 stages=37
+VERIFY nvfp4_8192 OK (64 Stichproben, max. rel. Fehler 9.51e-04)
+nvfp4       16384     8    376.60    376.14     96.21  tile=20 stages=37
+VERIFY nvfp4_16384 OK (64 Stichproben, max. rel. Fehler 6.13e-04)
+OK tensorpeak fertig
+Test                      Wert  T max  P Med  P max  SM MHz  Util   PCIe   Wert/W  Drossel
+tf32_8192                41.21  (keine Telemetrie)
+tf32_16384               45.56  (keine Telemetrie)
+fp16_8192                96.79  (keine Telemetrie)
+fp16_16384               92.93  (keine Telemetrie)
+bf16_8192                99.27  (keine Telemetrie)
+bf16_16384               91.17  (keine Telemetrie)
+int8_8192               192.94  (keine Telemetrie)
+int8_16384              162.91  (keine Telemetrie)
+fp8_8192                220.33  (keine Telemetrie)
+fp8_16384               217.39  (keine Telemetrie)
+nvfp4_8192              374.85  (keine Telemetrie)
+nvfp4_16384             375.17  (keine Telemetrie)
+rc=0
